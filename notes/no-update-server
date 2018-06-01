@@ -333,9 +333,6 @@ GAZE_URL: 'http://gaze.mysociety.org/gaze'
 # empty = use /usr/sbin/sendmail'
 SMTP_SMARTHOST: ''
 
-AUTH_SHARED_SECRET: ''
-HEARFROMYOURMP_BASE_URL: ''
-
 ANDROID_URL: 'http://wiki.nuug.no/grupper/fiksgatami/android'
 
 ALLOWED_COBRANDS: 'fiksgatami'
@@ -511,7 +508,7 @@ case "$1" in
 	;;
     update)
 	fetch_git_source
-	fgmdbpassword=$(grep OPTION_BCI_DB_PASS $basedir/fixmystreet/conf/general | cut -d\' -f4)
+	fgmdbpassword=$(grep OPTION_FMS_DB_PASS $basedir/fixmystreet/conf/general | cut -d\' -f4)
 	midbpassword=$(grep OPTION_MAPIT_DB_PASS $basedir/mapit/conf/general | cut -d\' -f4)
 
 	update_fixmystreet_config www-data $fgmdbpassword fixmystreet

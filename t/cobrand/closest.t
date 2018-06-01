@@ -1,19 +1,16 @@
-use strict;
-use warnings;
+use t::Mock::Bing;
 
-use Test::More;
+use FixMyStreet::DB;
+use FixMyStreet::TestMech;
 
-use mySociety::Locale;
-use FixMyStreet::App;
+my $mech = FixMyStreet::TestMech->new;
 
 use_ok 'FixMyStreet::Cobrand';
-
-mySociety::Locale::gettext_domain( 'FixMyStreet' );
 
 my $c = FixMyStreet::Cobrand::UK->new();
 
 my $user =
-  FixMyStreet::App->model('DB::User')
+  FixMyStreet::DB->resultset('User')
   ->find_or_create( { email => 'test@example.com', name => 'Test User' } );
 ok $user, "created test user";
 
@@ -26,10 +23,10 @@ my $dt = DateTime->new(
     second => 23
 );
 
-my $report = FixMyStreet::App->model('DB::Problem')->find_or_create(
+my $report = FixMyStreet::DB->resultset('Problem')->find_or_create(
     {
-        postcode           => 'SW1A 1AA',
-        council            => '2504',
+        postcode           => 'E142DN',
+        bodies_str         => '2504',
         areas              => ',105255,11806,11828,2247,2504,',
         category           => 'Other',
         title              => 'Test 2',
@@ -44,8 +41,8 @@ my $report = FixMyStreet::App->model('DB::Problem')->find_or_create(
         cobrand            => 'default',
         cobrand_data       => '',
         send_questionnaire => 't',
-        latitude           => '51.5016605453401',
-        longitude          => '-0.142497580865087',
+        latitude           => 51.508536,
+        longitude          => 0.000001,
         user_id            => $user->id,
     }
 );
@@ -53,26 +50,40 @@ my $report_id = $report->id;
 ok $report, "created test report - $report_id";
 
 $report->geocode( undef );
+ok !$report->geocode, 'no geocode entry for report';
 
-ok !$report->geocode, 'no gecode entry for report';
+FixMyStreet::override_config {
+    MAPIT_URL => 'http://mapit.uk/',
+    BING_MAPS_API_KEY => 'test',
+}, sub {
+    my $near = $c->find_closest($report);
+    ok $report->geocode, 'geocode entry added to report';
+    ok $report->geocode->{resourceSets}, 'geocode entry looks like right sort of thing';
 
-my $near = $c->find_closest( $report->latitude, $report->longitude, $report );
+    like $near, qr/Constitution Hill/i, 'nearest street looks right';
+    like $near, qr/Nearest postcode .*: E14 2DN/i, 'nearest postcode looks right';
 
-ok $report->geocode, 'geocode entry added to report';
-ok $report->geocode->{resourceSets}, 'geocode entry looks like right sort of thing';
+    $near = $c->find_closest_address_for_rss($report);
 
-like $near, qr/Constitution Hill/i, 'nearest street looks right';
-like $near, qr/Nearest postcode .*: SW1A 1AA/i, 'nearest postcode looks right';
+    like $near, qr/Constitution Hill/i, 'nearest street for RSS looks right';
+    unlike $near, qr/Nearest postcode/i, 'no nearest postcode in RSS text';
 
-$near = $c->find_closest_address_for_rss( $report->latitude, $report->longitude, $report );
+    $report->geocode( undef );
+    $near = $c->find_closest_address_for_rss($report);
 
-like $near, qr/Constitution Hill/i, 'nearest street for RSS looks right';
-unlike $near, qr/Nearest postcode/i, 'no nearest postcode in RSS text';
+    ok !$near, 'no closest address for RSS if not cached';
 
-$report->geocode( undef );
-$near = $c->find_closest_address_for_rss( $report->latitude, $report->longitude, $report );
+    my $json = $mech->get_ok_json('/ajax/closest?lat=55&lon=-1');
+    is_deeply $json, {"road"=> "Constitution Hill","full_address"=>"Constitution Hill, London, SW1A"};
+};
 
-ok !$near, 'no closest address for RSS if not cached';
+FixMyStreet::override_config {
+    ALLOWED_COBRANDS => 'fixmystreet',
+    MAPIT_URL => 'http://mapit.uk/',
+    BING_MAPS_API_KEY => 'test',
+}, sub {
+    my $json = $mech->get_ok_json('/ajax/closest?lat=55.952055&lon=-3.189579');
+    is_deeply $json, {"road"=> "Constitution Hill","full_address"=>"Constitution Hill, London, SW1A"};
+};
 
-# all done
 done_testing();

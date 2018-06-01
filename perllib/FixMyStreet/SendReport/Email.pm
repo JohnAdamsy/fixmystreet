@@ -1,104 +1,112 @@
 package FixMyStreet::SendReport::Email;
 
-use Moose;
+use Moo;
+use FixMyStreet::Email;
+use Utils::Email;
 
 BEGIN { extends 'FixMyStreet::SendReport'; }
 
-use mySociety::EmailUtil;
-
 sub build_recipient_list {
-    my $self = shift;
-    my $row = shift;
-    my %recips;
+    my ( $self, $row, $h ) = @_;
 
     my $all_confirmed = 1;
-    foreach my $council ( keys %{ $self->councils } ) {
-        my $contact = FixMyStreet::App->model("DB::Contact")->find( {
-            deleted => 0,
-            area_id => $council,
+    foreach my $body ( @{ $self->bodies } ) {
+
+        my $contact = $row->result_source->schema->resultset("Contact")->not_deleted->find( {
+            body_id => $body->id,
             category => $row->category
         } );
 
-        my ($council_email, $confirmed, $note) = ( $contact->email, $contact->confirmed, $contact->note );
+        my ($body_email, $state, $note) = ( $contact->email, $contact->state, $contact->note );
 
-        $council_email = essex_contact($row->latitude, $row->longitude) if $council == 2225;
-        $council_email = oxfordshire_contact($row->latitude, $row->longitude) if $council == 2237 && $council_email eq 'SPECIAL';
-
-        unless ($confirmed) {
+        unless ($state eq 'confirmed') {
             $all_confirmed = 0;
-            #$note = 'Council ' . $row->council . ' deleted'
-                #unless $note;
-            $council_email = 'N/A' unless $council_email;
-            #$notgot{$council_email}{$row->category}++;
-            #$note{$council_email}{$row->category} = $note;
+            $note = 'Body ' . $row->bodies_str . ' deleted'
+                unless $note;
+            $body_email = 'N/A' unless $body_email;
+            $self->unconfirmed_counts->{$body_email}{$row->category}++;
+            $self->unconfirmed_notes->{$body_email}{$row->category} = $note;
         }
 
-        push @{ $self->to }, [ $council_email, $self->councils->{ $council } ];
-        $recips{$council_email} = 1;
+        my @emails;
+        # allow multiple emails per contact
+        if ( $body_email =~ /,/ ) {
+            @emails = split(/,/, $body_email);
+        } else {
+            @emails = ( $body_email );
+        }
+        for my $email ( @emails ) {
+            push @{ $self->to }, [ $email, $body->name ];
+        }
     }
 
-    return () unless $all_confirmed;
-    return keys %recips;
+    return $all_confirmed && @{$self->to};
+}
+
+sub get_template {
+    my ( $self, $row ) = @_;
+    return 'submit.txt';
+}
+
+sub send_from {
+    my ( $self, $row ) = @_;
+    return [ $row->user->email, $row->name ];
 }
 
 sub send {
     my $self = shift;
-    my ( $row, $h, $to, $template, $recips, $nomail, $areas_info ) = @_;
+    my ( $row, $h ) = @_;
 
-    my @recips;
+    my $recips = $self->build_recipient_list( $row, $h );
 
-    @recips = $self->build_recipient_list( $row, $areas_info );
-
-    # on a staging server send emails to ourselves rather than the councils
-    if (mySociety::Config::get('STAGING_SITE')) {
-        @recips = ( mySociety::Config::get('CONTACT_EMAIL') );
+    # on a staging server send emails to ourselves rather than the bodies
+    if (FixMyStreet->staging_flag('send_reports', 0) && !FixMyStreet->test_mode) {
+        $recips = 1;
+        @{$self->to} = [ $row->user->email, $self->to->[0][1] || $row->name ];
     }
 
-    return unless @recips;
+    unless ($recips) {
+        $self->error( 'No recipients' );
+        return 1;
+    }
 
-    my $result = FixMyStreet::App->send_email_cron(
-        {
-            _template_ => $template,
-            _parameters_ => $h,
-            To => $self->to,
-            From => [ $row->user->email, $row->name ],
-        },
-        mySociety::Config::get('CONTACT_EMAIL'),
-        \@recips,
-        $nomail
-    );
+    my ($verbose, $nomail) = CronFns::options();
+    my $cobrand = FixMyStreet::Cobrand->get_class_for_moniker($row->cobrand)->new();
+    my $params = {
+        To => $self->to,
+    };
 
-    if ( $result == mySociety::EmailUtil::EMAIL_SUCCESS ) {
+    $cobrand->call_hook(munge_sendreport_params => $row, $h, $params);
+
+    $params->{Bcc} = $self->bcc if @{$self->bcc};
+
+    my $sender;
+    if ($row->user->email && $row->user->email_verified) {
+        $sender = FixMyStreet::Email::unique_verp_id('report', $row->id);
+        $params->{From} = $self->send_from( $row );
+    } else {
+        $sender = FixMyStreet->config('DO_NOT_REPLY_EMAIL');
+        my $name = sprintf(_("On behalf of %s"), @{ $self->send_from($row) }[1]);
+        $params->{From} = [ $sender, $name ];
+    }
+
+    if (FixMyStreet::Email::test_dmarc($params->{From}[0])
+      || Utils::Email::same_domain($params->{From}, $params->{To})) {
+        $params->{'Reply-To'} = [ $params->{From} ];
+        $params->{From} = [ $sender, $params->{From}[1] ];
+    }
+
+    my $result = FixMyStreet::Email::send_cron($row->result_source->schema,
+        $self->get_template($row), $h,
+        $params, $sender, $nomail, $cobrand, $row->lang);
+
+    unless ($result) {
         $self->success(1);
     } else {
         $self->error( 'Failed to send email' );
     }
 
     return $result;
-}
-
-# Essex has different contact addresses depending upon the district
-# Might be easier if we start storing in the db all areas covered by a point
-# Will do for now :)
-sub essex_contact {
-    my $district = _get_district_for_contact(@_);
-    my $email;
-    $email = 'eastarea' if $district == 2315 || $district == 2312;
-    $email = 'midarea' if $district == 2317 || $district == 2314 || $district == 2316;
-    $email = 'southarea' if $district == 2319 || $district == 2320 || $district == 2310;
-    $email = 'westarea' if $district == 2309 || $district == 2311 || $district == 2318 || $district == 2313;
-    die "Returned district $district which is not in Essex!" unless $email;
-    return "highways.$email\@essexcc.gov.uk";
-}
-
-# Oxfordshire has different contact addresses depending upon the district
-sub oxfordshire_contact {
-    my $district = _get_district_for_contact(@_);
-    my $email;
-    $email = 'northernarea' if $district == 2419 || $district == 2420 || $district == 2421;
-    $email = 'southernarea' if $district == 2417 || $district == 2418;
-    die "Returned district $district which is not in Oxfordshire!" unless $email;
-    return "$email\@oxfordshire.gov.uk";
 }
 
 sub _get_district_for_contact {
@@ -108,4 +116,5 @@ sub _get_district_for_contact {
     ($district) = keys %$district;
     return $district;
 }
+
 1;

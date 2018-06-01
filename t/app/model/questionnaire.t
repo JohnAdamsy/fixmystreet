@@ -1,16 +1,9 @@
-#!/usr/bin/perl
-
-use strict;
-use warnings;
-
-use Test::More;
-
 use FixMyStreet;
 use FixMyStreet::TestMech;
 
-my $user = FixMyStreet::App->model('DB::User')->find_or_create( { email => 'test@example.com' } );
+my $user = FixMyStreet::DB->resultset('User')->find_or_create( { email => 'test@example.com' } );
 
-my $problem = FixMyStreet::App->model('DB::Problem')->create(
+my $problem = FixMyStreet::DB->resultset('Problem')->create(
     {
         postcode     => 'EH99 1SP',
         latitude     => 1,
@@ -25,14 +18,12 @@ my $problem = FixMyStreet::App->model('DB::Problem')->create(
         service      => '',
         cobrand      => 'default',
         cobrand_data => '',
-        confirmed    => \"ms_current_timestamp() - '5 weeks'::interval",
-        whensent     => \"ms_current_timestamp() - '5 weeks'::interval",
+        confirmed    => \"current_timestamp - '5 weeks'::interval",
+        whensent     => \"current_timestamp - '5 weeks'::interval",
         user         => $user,
         anonymous    => 0,
     }
 );
-
-diag $problem->id;
 
 my $mech = FixMyStreet::TestMech->new;
 
@@ -62,6 +53,10 @@ for my $test (
         send_email => 1,
     },
     {
+        state => 'action scheduled',
+        send_email => 1,
+    },
+    {
         state => 'in progress',
         send_email => 1,
     },
@@ -75,6 +70,18 @@ for my $test (
     },
     {
         state => 'fixed - user',
+        send_email => 1,
+    },
+    {
+        state => 'duplicate',
+        send_email => 1,
+    },
+    {
+        state => 'unable to fix',
+        send_email => 1,
+    },
+    {
+        state => 'not responsible',
         send_email => 1,
     },
     {
@@ -92,7 +99,7 @@ for my $test (
 
         $mech->email_count_is(0);
 
-        FixMyStreet::App->model('DB::Questionnaire')
+        FixMyStreet::DB->resultset('Questionnaire')
           ->send_questionnaires( { site => 'fixmystreet' } );
 
         $mech->email_count_is( $test->{send_email} );
@@ -100,7 +107,5 @@ for my $test (
         $mech->clear_emails_ok();
     }
 }
-
-$mech->delete_user( $user );
 
 done_testing();

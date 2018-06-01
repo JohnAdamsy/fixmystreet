@@ -1,133 +1,103 @@
 package FixMyStreet::SendReport::Open311;
 
-use Moose;
+use Moo;
 use namespace::autoclean;
 
 BEGIN { extends 'FixMyStreet::SendReport'; }
 
-use FixMyStreet::App;
-use mySociety::Config;
-use DateTime::Format::W3CDTF;
 use Open311;
 
-sub should_skip {
-    my $self = shift;
-    my $row  = shift;
-
-    if ( $row->send_fail_count > 0 ) {
-        if ( bromley_retry_timeout($row) ) {
-            return 1;
-        }
-    }
-}
+has open311_test_req_used => (
+    is => 'rw',
+);
 
 sub send {
     my $self = shift;
-    my ( $row, $h, $to, $template, $recips, $nomail ) = @_;
+    my ( $row, $h ) = @_;
 
     my $result = -1;
 
-    foreach my $council ( keys %{ $self->councils } ) {
-        my $conf = FixMyStreet::App->model("DB::Open311conf")->search( { area_id => $council, endpoint => { '!=', '' } } )->first;
+    foreach my $body ( @{ $self->bodies } ) {
+        my $conf = $self->body_config->{ $body->id };
 
-        my $always_send_latlong = 1;
-        my $send_notpinpointed  = 0;
+        my %open311_params = (
+            jurisdiction            => $conf->jurisdiction,
+            endpoint                => $conf->endpoint,
+            api_key                 => $conf->api_key,
+            always_send_latlong     => 1,
+            send_notpinpointed      => 0,
+            use_service_as_deviceid => 0,
+            extended_description    => 1,
+            multi_photos            => 0,
+        );
 
-        my $basic_desc = 0;
+        my $cobrand = $body->get_cobrand_handler || $row->get_cobrand_logged;
+        $cobrand->call_hook(open311_config => $row, $h, \%open311_params);
 
-        # Extra bromley fields
-        if ( $row->council =~ /2482/ ) {
+        # Try and fill in some ones that we've been asked for, but not asked the user for
 
-            my $extra = $row->extra;
-            if ( $row->used_map || ( !$row->used_map && !$row->postcode ) ) {
-                push @$extra, { name => 'northing', value => $h->{northing} };
-                push @$extra, { name => 'easting', value => $h->{easting} };
-            }
-            push @$extra, { name => 'report_url', value => $h->{url} };
-            push @$extra, { name => 'service_request_id_ext', value => $row->id };
-            push @$extra, { name => 'report_title', value => $row->title };
-            push @$extra, { name => 'public_anonymity_required', value => $row->anonymous ? 'TRUE' : 'FALSE' };
-            push @$extra, { name => 'email_alerts_requested', value => 'FALSE' }; # always false as can never request them
-            push @$extra, { name => 'requested_datetime', value => DateTime::Format::W3CDTF->format_datetime($row->confirmed_local->set_nanosecond(0)) };
-            push @$extra, { name => 'email', value => $row->user->email };
-            $row->extra( $extra );
-
-            $always_send_latlong = 0;
-            $send_notpinpointed = 1;
-
-            # make sure we have last_name attribute present in row's extra, so
-            # it is passed correctly to Bromley as attribute[]
-            if ( $row->cobrand ne 'bromley' ) {
-                my ( $firstname, $lastname ) = ( $row->user->name =~ /(\w+)\.?\s+(.+)/ );
-                push @$extra, { name => 'last_name', value => $lastname };
-            }
-
-            $basic_desc = 1;
-        }
-
-        # FIXME: we've already looked this up before
-        my $contact = FixMyStreet::App->model("DB::Contact")->find( {
-            deleted => 0,
-            area_id => $conf->area_id,
+        my $contact = $row->result_source->schema->resultset("Contact")->not_deleted->find( {
+            body_id => $body->id,
             category => $row->category
         } );
 
-        my $open311 = Open311->new(
-            jurisdiction        => $conf->jurisdiction,
-            endpoint            => $conf->endpoint,
-            api_key             => $conf->api_key,
-            always_send_latlong => $always_send_latlong,
-            send_notpinpointed  => $send_notpinpointed,
-            basic_description   => $basic_desc,
-        );
+        my $extra = $row->get_extra_fields();
 
-        # non standard west berks end points
-        if ( $row->council =~ /2619/ ) {
-            $open311->endpoints( { services => 'Services', requests => 'Requests' } );
+        my $id_field = $contact->id_field;
+        foreach (@{$contact->get_extra_fields}) {
+            if ($_->{code} eq $id_field) {
+                push @$extra, { name => $id_field, value => $row->id };
+            } elsif ($_->{code} eq 'closest_address' && $h->{closest_address}) {
+                push @$extra, { name => $_->{code}, value => "$h->{closest_address}" };
+            } elsif ($_->{code} =~ /^(easting|northing)$/) {
+                # NB If there's ever a cobrand with always_send_latlong=0 and
+                # send_notpinpointed=0 then this line will need changing to
+                # consider the send_notpinpointed check, as per the
+                # '#NOTPINPOINTED#' code in perllib/Open311.pm.
+                if ( $row->used_map || $open311_params{always_send_latlong} || (
+                    !$row->used_map && !$row->postcode && $open311_params{send_notpinpointed}
+                ) ) {
+                    push @$extra, { name => $_->{code}, value => $h->{$_->{code}} };
+                }
+            }
         }
 
-        # required to get round issues with CRM constraints
-        if ( $row->council =~ /2218/ ) {
-            $row->user->name( $row->user->id . ' ' . $row->user->name );
+        $row->set_extra_fields( @$extra ) if @$extra;
+
+        if (FixMyStreet->test_mode) {
+            my $test_res = HTTP::Response->new();
+            $test_res->code(200);
+            $test_res->message('OK');
+            $test_res->content('<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>');
+            $open311_params{test_mode} = 1;
+            $open311_params{test_get_returns} = { 'requests.xml' => $test_res };
         }
+
+        my $open311 = Open311->new( %open311_params );
+
+        $cobrand->call_hook(open311_pre_send => $row, $open311);
 
         my $resp = $open311->send_service_request( $row, $h, $contact->email );
+        if (FixMyStreet->test_mode) {
+            $self->open311_test_req_used($open311->test_req_used);
+        }
 
         # make sure we don't save user changes from above
-        if ( $row->council =~ /2218/ || $row->council =~ /2482/ ) {
-            $row->discard_changes();
-        }
+        $row->discard_changes();
 
         if ( $resp ) {
             $row->external_id( $resp );
-            $row->send_method_used('Open311');
             $result *= 0;
             $self->success( 1 );
         } else {
             $result *= 1;
-            # temporary fix to resolve some issues with west berks
-            if ( $row->council =~ /2619/ ) {
-                $result *= 0;
-            }
+            $self->error( "Failed to send over Open311\n" ) unless $self->error;
+            $self->error( $self->error . "\n" . $open311->error );
         }
     }
 
-    $self->error( 'Failed to send over Open311' ) unless $self->success;
 
     return $result;
-}
-
-sub bromley_retry_timeout {
-    my $row = shift;
-
-    my $tz = DateTime::TimeZone->new( name => 'local' );
-    my $now = DateTime->now( time_zone => $tz );
-    my $diff = $now - $row->send_fail_timestamp;
-    if ( $diff->in_units( 'minutes' ) < 30 ) {
-        return 1;
-    }
-
-    return 0;
 }
 
 1;

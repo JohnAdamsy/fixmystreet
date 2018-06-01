@@ -1,5 +1,3 @@
-#!/usr/bin/perl
-#
 # Utils.pm:
 # Various generic utilities for FixMyStreet.
 #
@@ -12,30 +10,12 @@
 package Utils;
 
 use strict;
+use DateTime;
 use Encode;
 use File::Slurp qw();
-use POSIX qw(strftime);
-use mySociety::DBHandle qw(dbh);
 use mySociety::GeoUtil;
 use mySociety::Locale;
-
-sub workaround_pg_bytea {
-    my ( $st, $img_idx, @elements ) = @_;
-    my $s = dbh()->prepare($st);
-    for ( my $i = 1 ; $i <= @elements ; $i++ ) {
-        if ( $i == $img_idx ) {
-            $s->bind_param(
-                $i,
-                $elements[ $i - 1 ],
-                { pg_type => DBD::Pg::PG_BYTEA }
-            );
-        }
-        else {
-            $s->bind_param( $i, $elements[ $i - 1 ] );
-        }
-    }
-    $s->execute();
-}
+use FixMyStreet;
 
 =head2 convert_latlon_to_en
 
@@ -46,12 +26,13 @@ Takes the WGS84 latitude and longitude and returns OSGB36 easting and northing.
 =cut
 
 sub convert_latlon_to_en {
-    my ( $latitude, $longitude ) = @_;
+    my ( $latitude, $longitude, $coordsyst ) = @_;
+    $coordsyst ||= 'G';
 
     local $SIG{__WARN__} = sub { die $_[0] };
     my ( $easting, $northing ) =
         mySociety::Locale::in_gb_locale {
-            mySociety::GeoUtil::wgs84_to_national_grid( $latitude, $longitude, 'G' );
+            mySociety::GeoUtil::wgs84_to_national_grid( $latitude, $longitude, $coordsyst );
         };
 
     return ( $easting, $northing );
@@ -111,76 +92,6 @@ sub truncate_coordinate {
     return $out;
 }
 
-sub london_categories {
-    return {
-        'Abandoned vehicle' => 'AbandonedVehicle',
-        'Car parking' => 'Parking',
-        'Dangerous structure' => 'DangerousStructure',
-        'Dead animal' => 'DeadAnimal',
-        'Dumped cylinder' => 'DumpedCylinder',
-        'Dumped rubbish' => 'DumpedRubbish',
-        'Flyposting' => 'FlyPosting',
-        'Graffiti' => 'Graffiti',
-        'Litter bin' => 'LitterBin',
-        'Public toilet' => 'PublicToilet',
-        'Refuse collection' => 'RefuseCollection',
-        'Road or pavement defect' => 'Road',
-        'Road or pavement obstruction' => 'Obstruction',
-        'Skip problem' => 'Skip',
-        'Street cleaning' => 'StreetCleaning',
-        'Street drainage' => 'StreetDrainage',
-        'Street furniture' => 'StreetFurniture',
-        'Street needs gritting' => 'StreetGritting',
-        'Street lighting' => 'StreetLighting',
-        'Street sign' => 'StreetSign',
-        'Traffic light' => 'TrafficLight',
-        'Tree (dangerous)' => 'DangerousTree',
-        'Tree (fallen branches)' => 'FallenTree',
-        'Untaxed vehicle' => 'UntaxedVehicle',
-    };
-}
-
-sub barnet_categories {
-    # The values here are KBIDs from Barnet's system: see bin/send-reports for formatting 
-    if (mySociety::Config::get('STAGING_SITE')) { # note staging site must use different KBIDs
-        return {
-             'Blocked drain'             => 255,  # Gullies-Blocked
-             'Dead animal'               => 286,  # Animals-Dead-Removal
-             'Dog fouling'               => 288,  # Dog Fouling-Clear
-             'Fly tipping'               => 347,  # Fly tipping-Clear
-             'Graffiti'                  => 292,  # Graffiti-Removal
-             'Litter, accumulated'       => 349,  # Accumulated Litter
-             'Litter, overflowing bins'  => 205,  # Litter Bins-Overflowing
-             'Pavements'                 => 195,  # Pavements-Damaged/Cracked
-             'Pothole'                   => 204,  # Pothole
-             'Roads Signs'               => 432,  # Roads Signs - Maintenance
-             'Street Lighting'           => 251,  # Street Lighting
-             'Traffic Lights'            => 103,  # Traffic Lights
-        }
-    } else {
-        return {
-            'Abandoned Vehicle'         => 468,
-            'Accumulated Litter'        => 349,
-            'Dog Bin'                   => 203,
-            'Dog Fouling'               => 288,
-            'Drain or Gully'            => 256,
-            'Fly Posting'               => 465,
-            'Fly Tipping'               => 449,
-            'Graffiti'                  => 292,
-            'Gritting'                  => 200,
-            'Highways'                  => 186,
-            'Litter Bin Overflowing'    => 205,
-            'Manhole Cover'             => 417,
-            'Overhanging Foliage'       => 421,
-            'Pavement Damaged/Cracked'  => 195,
-            'Pothole'                   => 204,
-            'Road Sign'                 => 80,
-            'Roadworks'                 => 246,
-            'Street Lighting'           => 251,
-        };
-    }
-}
-
 =head2 trim_text
 
     my $text = trim_text( $text_to_trim );
@@ -188,7 +99,7 @@ sub barnet_categories {
 Strip leading and trailing white space from a string. Also reduces all
 white space to a single space.
 
-Trim 
+Trim
 
 =cut
 
@@ -251,70 +162,101 @@ sub cleanup_text {
     return $input;
 }
 
-sub prettify_epoch {
-    my ( $s, $type ) = @_;
+sub prettify_dt {
+    my ( $dt, $type ) = @_;
+    $type ||= '';
     $type = 'short' if $type eq '1';
 
-    my @s = localtime($s);
+    my $now = DateTime->now( time_zone => FixMyStreet->time_zone || FixMyStreet->local_time_zone );
+
     my $tt = '';
-    $tt = strftime('%H:%M', @s) unless $type eq 'date';
-    my @t = localtime();
-    if (strftime('%Y%m%d', @s) eq strftime('%Y%m%d', @t)) {
+    return "[unknown time]" unless ref $dt;
+    $tt = $dt->strftime('%H:%M') unless $type eq 'date';
+
+    if ($dt->strftime('%Y%m%d') eq $now->strftime('%Y%m%d')) {
         return "$tt " . _('today');
     }
     $tt .= ', ' unless $type eq 'date';
-    if (strftime('%Y %U', @s) eq strftime('%Y %U', @t)) {
-        $tt .= decode_utf8(strftime('%A', @s));
+    if ($dt->strftime('%Y %U') eq $now->strftime('%Y %U')) {
+        $tt .= $dt->strftime('%A');
+    } elsif ($type eq 'zurich') {
+        $tt .= $dt->strftime('%e. %B %Y');
     } elsif ($type eq 'short') {
-        $tt .= decode_utf8(strftime('%e %b %Y', @s));
-    } elsif (strftime('%Y', @s) eq strftime('%Y', @t)) {
-        $tt .= decode_utf8(strftime('%A %e %B %Y', @s));
+        $tt .= $dt->strftime('%e %b %Y');
+    } elsif ($dt->strftime('%Y') eq $now->strftime('%Y')) {
+        $tt .= $dt->strftime('%A %e %B %Y');
     } else {
-        $tt .= decode_utf8(strftime('%a %e %B %Y', @s));
+        $tt .= $dt->strftime('%a %e %B %Y');
     }
+    $tt = decode_utf8($tt) if !utf8::is_utf8($tt);
     return $tt;
 }
 
 # argument is duration in seconds, rounds to the nearest minute
 sub prettify_duration {
     my ($s, $nearest) = @_;
-    if ($nearest eq 'week') {
+
+    unless ( defined $nearest ) {
+        if ($s < 3600) {
+            $nearest = 'minute';
+        } elsif ($s < 3600*24) {
+            $nearest = 'hour';
+        } elsif ($s < 3600*24*7) {
+            $nearest = 'day';
+        } elsif ($s < 3600*24*7*4) {
+            $nearest = 'week';
+        } elsif ($s < 3600*24*7*4*12) {
+            $nearest = 'month';
+        } else {
+            $nearest = 'year';
+        }
+    }
+
+    if ($nearest eq 'year') {
+        $s = int(($s+60*60*24*3.5)/60/60/24/7/4/12)*60*60*24*7*4*12;
+    } elsif ($nearest eq 'month') {
+        $s = int(($s+60*60*24*3.5)/60/60/24/7/4)*60*60*24*7*4;
+    } elsif ($nearest eq 'week') {
         $s = int(($s+60*60*24*3.5)/60/60/24/7)*60*60*24*7;
     } elsif ($nearest eq 'day') {
         $s = int(($s+60*60*12)/60/60/24)*60*60*24;
     } elsif ($nearest eq 'hour') {
         $s = int(($s+60*30)/60/60)*60*60;
-    } elsif ($nearest eq 'minute') {
+    } else { # minute
         $s = int(($s+30)/60)*60;
         return _('less than a minute') if $s == 0;
     }
     my @out = ();
-    _part(\$s, 60*60*24*7, _('%d week'), _('%d weeks'), \@out);
-    _part(\$s, 60*60*24, _('%d day'), _('%d days'), \@out);
-    _part(\$s, 60*60, _('%d hour'), _('%d hours'), \@out);
-    _part(\$s, 60, _('%d minute'), _('%d minutes'), \@out);
+    _part(\$s, 60*60*24*7*4*12, \@out);
+    _part(\$s, 60*60*24*7*4, \@out);
+    _part(\$s, 60*60*24*7, \@out);
+    _part(\$s, 60*60*24, \@out);
+    _part(\$s, 60*60, \@out);
+    _part(\$s, 60,  \@out);
     return join(', ', @out);
 }
 sub _part {
-    my ($s, $m, $w1, $w2, $o) = @_;
+    my ($s, $m, $o) = @_;
     if ($$s >= $m) {
         my $i = int($$s / $m);
-        push @$o, sprintf(mySociety::Locale::nget($w1, $w2, $i), $i);
+        my $str;
+        if ($m == 60*60*24*7*4*12) {
+            $str = mySociety::Locale::nget("%d year", "%d years", $i);
+        } elsif ($m == 60*60*24*7*4) {
+            $str = mySociety::Locale::nget("%d month", "%d months", $i);
+        } elsif ($m == 60*60*24*7) {
+            $str = mySociety::Locale::nget("%d week", "%d weeks", $i);
+        } elsif ($m == 60*60*24) {
+            $str = mySociety::Locale::nget("%d day", "%d days", $i);
+        } elsif ($m == 60*60) {
+            $str = mySociety::Locale::nget("%d hour", "%d hours", $i);
+        } else {
+            $str = mySociety::Locale::nget("%d minute", "%d minutes", $i);
+        }
+        push @$o, sprintf($str, $i);
         $$s -= $i * $m;
     }
 }
 
-=head2 read_file
-
-Reads in a UTF-8 encoded file using File::Slurp and decodes it from UTF-8.
-This appears simplest, rather than getting confused with binmodes and so on.
-
-=cut
-sub read_file {
-    my $filename = shift;
-    my $data = File::Slurp::read_file( $filename );
-    $data = Encode::decode( 'utf8', $data );
-    return $data;
-}
 
 1;

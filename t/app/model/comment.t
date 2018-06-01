@@ -1,14 +1,6 @@
-#!/usr/bin/perl
+use FixMyStreet::Test;
 
-use strict;
-use warnings;
-
-use Test::More tests => 2;
-
-use FixMyStreet;
-use FixMyStreet::App;
-
-my $comment_rs = FixMyStreet::App->model('DB::Comment');
+my $comment_rs = FixMyStreet::DB->resultset('Comment');
 
 my $comment = $comment_rs->new(
     {
@@ -23,5 +15,6 @@ my $comment = $comment_rs->new(
     }
 );
 
-is $comment->confirmed_local,  undef, 'inflating null confirmed ok';
-is $comment->created_local,  undef, 'inflating null confirmed ok';
+is $comment->confirmed,  undef, 'inflating null confirmed ok';
+is $comment->created,  undef, 'inflating null confirmed ok';
+done_testing();

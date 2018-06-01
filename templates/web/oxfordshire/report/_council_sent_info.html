@@ -1,0 +1,16 @@
+[% IF problem.whensent || problem.can_display_external_id %]
+    <div class="council_info_box">
+      [% IF problem.can_display_external_id %]
+        <h3>
+          [% IF problem.whensent %]
+              Council ref:&nbsp;[% problem.external_id %]
+          [% ELSE %]
+              [% problem.external_body %] ref:&nbsp;[% problem.external_id %]
+          [% END %]
+        </h3>
+      [% END %]
+
+      [% INCLUDE '_response_time.html' %]
+
+    </div>
+[% END %]

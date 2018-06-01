@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 #
 # xgettext doesn't deal with TT files, but xgettext.pl doesn't find nget()s, sigh.
 # This will find the nget()s and output a .po file excerpt.
@@ -9,26 +9,28 @@ my %out;
 
 find( sub {
     next unless -f;
+    next if $File::Find::name =~ /ttc$/;
     open (FP, $_) or die $!;
     while (<FP>) {
         next unless /nget/;
         my $line = $.;
         my $text = $_;
-        do {
+        while ($text !~ /\)/) {
             $text .= <FP>;
-        } until $text =~ /\)/;
-        $text =~ /nget\(\s*"(.*?)"\s*,\s*"(.*?)"\s*,\s*(.*?)\s*\)/s;
-        $out{$1} = {
-            file => $File::Find::name,
-            line => $line,
-            s => $1,
-            p => $2,
-        };
+        }
+        if ($text =~ /nget\(\s*(['"])(.*?)\1\s*,\s*(['"])(.*?)\3\s*,\s*(.*?)\s*\)/s) {
+            $out{$2} = {
+                file => $File::Find::name,
+                line => $line,
+                s => $2,
+                p => $4,
+            };
+        }
     }
     close FP;
-}, 'templates');
+}, 'templates', 'perllib');
 
-foreach (values %out) {
+foreach (sort { $a->{s} cmp $b->{s} } values %out) {
     print <<EOF;
 
 #: $_->{file}:$_->{line}

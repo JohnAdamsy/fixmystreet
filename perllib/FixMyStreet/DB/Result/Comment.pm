@@ -6,6 +6,7 @@ package FixMyStreet::DB::Result::Comment;
 
 use strict;
 use warnings;
+use FixMyStreet::Template;
 
 use base 'DBIx::Class::Core';
 __PACKAGE__->load_components("FilterColumn", "InflateColumn::DateTime", "EncodedColumn");
@@ -31,8 +32,9 @@ __PACKAGE__->add_columns(
   "created",
   {
     data_type     => "timestamp",
-    default_value => \"ms_current_timestamp()",
+    default_value => \"current_timestamp",
     is_nullable   => 0,
+    original      => { default_value => \"now()" },
   },
   "confirmed",
   { data_type => "timestamp", is_nullable => 1 },
@@ -68,70 +70,50 @@ __PACKAGE__->add_columns(
   { data_type => "timestamp", is_nullable => 1 },
 );
 __PACKAGE__->set_primary_key("id");
+__PACKAGE__->might_have(
+  "moderation_original_data",
+  "FixMyStreet::DB::Result::ModerationOriginalData",
+  { "foreign.comment_id" => "self.id" },
+  { cascade_copy => 0, cascade_delete => 0 },
+);
 __PACKAGE__->belongs_to(
   "problem",
   "FixMyStreet::DB::Result::Problem",
   { id => "problem_id" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
 );
 __PACKAGE__->belongs_to(
   "user",
   "FixMyStreet::DB::Result::User",
   { id => "user_id" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
 );
 
 
-# Created by DBIx::Class::Schema::Loader v0.07017 @ 2012-03-26 15:44:18
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:nvkElEgSU6XcLd9znSqhmQ
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2015-08-13 16:33:38
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:ZR+YNA1Jej3s+8mr52iq6Q
+#
 
-__PACKAGE__->filter_column(
-    extra => {
-        filter_from_storage => sub {
-            my $self = shift;
-            my $ser  = shift;
-            return undef unless defined $ser;
-            my $h = new IO::String($ser);
-            return RABX::wire_rd($h);
-        },
-        filter_to_storage => sub {
-            my $self = shift;
-            my $data = shift;
-            my $ser  = '';
-            my $h    = new IO::String($ser);
-            RABX::wire_wr( $data, $h );
-            return $ser;
-        },
-    }
-);
+__PACKAGE__->load_components("+FixMyStreet::DB::RABXColumn");
+__PACKAGE__->rabx_column('extra');
 
-use DateTime::TimeZone;
-use Image::Size;
-use Moose;
+use Moo;
 use namespace::clean -except => [ 'meta' ];
-use RABX;
 
-with 'FixMyStreet::Roles::Abuser';
+with 'FixMyStreet::Roles::Abuser',
+     'FixMyStreet::Roles::Extra',
+     'FixMyStreet::Roles::PhotoSet';
 
-my $tz = DateTime::TimeZone->new( name => "local" );
+my $stz = sub {
+    my ( $orig, $self ) = ( shift, shift );
+    my $s = $self->$orig(@_);
+    return $s unless $s && UNIVERSAL::isa($s, "DateTime");
+    FixMyStreet->set_time_zone($s);
+    return $s;
+};
 
-sub created_local {
-    my $self = shift;
-
-    return $self->created
-      ? $self->created->set_time_zone($tz)
-      : $self->created;
-}
-
-sub confirmed_local {
-    my $self = shift;
-
-    # if confirmed is null then it doesn't get inflated so don't
-    # try and set the timezone
-    return $self->confirmed
-      ? $self->confirmed->set_time_zone($tz)
-      : $self->confirmed;
-}
+around created => $stz;
+around confirmed => $stz;
 
 # You can replace this text with custom code or comments, and it will be preserved on regeneration
 
@@ -146,6 +128,13 @@ sub check_for_errors {
     $errors{update} = _('Please enter a message')
       unless $self->text =~ m/\S/;
 
+    # Bromley Council custom character limit
+    if ( $self->text && $self->problem && $self->problem->bodies_str) {
+        if ($self->problem->to_body_named('Bromley') && length($self->text) > 1750) {
+            $errors{update} = sprintf( _('Updates are limited to %s characters in length. Please shorten your update'), 1750 );
+        }
+    }
+
     return \%errors;
 }
 
@@ -159,37 +148,154 @@ sub confirm {
     my $self = shift;
 
     $self->state( 'confirmed' );
-    $self->confirmed( \'ms_current_timestamp()' );
+    $self->confirmed( \'current_timestamp' );
 }
 
-=head2 get_photo_params
+sub url {
+    my $self = shift;
+    return "/report/" . $self->problem_id . '#update_' . $self->id;
+}
 
-Returns a hashref of details of any attached photo for use in templates.
+=head2 latest_moderation_log_entry
+
+Return most recent ModerationLog object
 
 =cut
 
-sub get_photo_params {
+sub latest_moderation_log_entry {
     my $self = shift;
-    return FixMyStreet::App::get_photo_params($self, 'c');
+    return $self->admin_log_entries->search({ action => 'moderation' }, { order_by => { -desc => 'id' } })->first;
 }
 
-=head2 meta_problem_state
+__PACKAGE__->has_many(
+  "admin_log_entries",
+  "FixMyStreet::DB::Result::AdminLog",
+  { "foreign.object_id" => "self.id" },
+  {
+      cascade_copy => 0, cascade_delete => 0,
+      where => { 'object_type' => 'update' },
+  }
+);
 
-Returns a string suitable for display in the update meta section. 
-Mostly removes the '- council/user' bit from fixed states
+# we already had the `moderation_original_data` rel above, as inferred by
+# Schema::Loader, but that doesn't know about the problem_id mapping, so we now
+# (slightly hackishly) redefine here:
+#
+# we also add cascade_delete, though this seems to be insufficient.
+#
+# TODO: should add FK on moderation_original_data field for this, to get S::L to
+# pick up without hacks.
+
+__PACKAGE__->might_have(
+  "moderation_original_data",
+  "FixMyStreet::DB::Result::ModerationOriginalData",
+  { "foreign.comment_id" => "self.id",
+    "foreign.problem_id" => "self.problem_id",
+  },
+  { cascade_copy => 0, cascade_delete => 1 },
+);
+
+=head2 meta_line
+
+Returns a string to be used on a report update, describing some of the metadata
+about an update
 
 =cut
 
-sub meta_problem_state {
-    my $self = shift;
+sub meta_line {
+    my ( $self, $c ) = @_;
 
-    my $state = $self->problem_state;
-    $state =~ s/ -.*$//;
+    my $meta = '';
 
-    return $state;
+    if ($self->anonymous or !$self->name) {
+        $meta = sprintf( _( 'Posted anonymously at %s' ), Utils::prettify_dt( $self->confirmed ) )
+    } elsif ($self->user->from_body || $self->get_extra_metadata('is_body_user') || $self->get_extra_metadata('is_superuser') ) {
+        my $user_name = FixMyStreet::Template::html_filter($self->user->name);
+        my $body;
+        if ($self->get_extra_metadata('is_superuser')) {
+            $body = _('an administrator');
+        } else {
+            # use this meta data in preference to the user's from_body setting
+            # in case they are no longer with the body, or have changed body.
+            if (my $body_id = $self->get_extra_metadata('is_body_user')) {
+                $body = FixMyStreet::App->model('DB::Body')->find({id => $body_id})->name;
+            } else {
+                $body = $self->user->body;
+            }
+            if ($body eq 'Bromley Council') {
+                $body = "$body <img src='/cobrands/bromley/favicon.png' alt=''>";
+            } elsif ($body eq 'Royal Borough of Greenwich') {
+                $body = "$body <img src='/cobrands/greenwich/favicon.png' alt=''>";
+            }
+        }
+        my $can_view_contribute = $c->user_exists && $c->user->has_permission_to('view_body_contribute_details', $self->problem->bodies_str_ids);
+        if ($self->text) {
+            if ($can_view_contribute) {
+                $meta = sprintf( _( 'Posted by <strong>%s</strong> (%s) at %s' ), $body, $user_name, Utils::prettify_dt( $self->confirmed ) );
+            } else {
+                $meta = sprintf( _( 'Posted by <strong>%s</strong> at %s' ), $body, Utils::prettify_dt( $self->confirmed ) );
+            }
+        } else {
+            if ($can_view_contribute) {
+                $meta = sprintf( _( 'Updated by <strong>%s</strong> (%s) at %s' ), $body, $user_name, Utils::prettify_dt( $self->confirmed ) );
+            } else {
+                $meta = sprintf( _( 'Updated by <strong>%s</strong> at %s' ), $body, Utils::prettify_dt( $self->confirmed ) );
+            }
+        }
+    } else {
+        $meta = sprintf( _( 'Posted by %s at %s' ), FixMyStreet::Template::html_filter($self->name), Utils::prettify_dt( $self->confirmed ) )
+    }
+
+    if ($self->get_extra_metadata('defect_raised')) {
+        $meta .= ', ' . _( 'and a defect raised' );
+    }
+
+    return $meta;
+};
+
+sub problem_state_display {
+    my ( $self, $c ) = @_;
+
+    my $update_state = '';
+    my $cobrand = $c->cobrand->moniker;
+
+    if ($self->mark_fixed) {
+        return FixMyStreet::DB->resultset("State")->display('fixed', 1);
+    } elsif ($self->mark_open)  {
+        return FixMyStreet::DB->resultset("State")->display('confirmed', 1);
+    } elsif ($self->problem_state) {
+        my $state = $self->problem_state;
+        my $cobrand_name = $cobrand;
+        $cobrand_name = 'bromley' if $self->problem->to_body_named('Bromley');
+        $update_state = FixMyStreet::DB->resultset("State")->display($state, 1, $cobrand_name);
+    }
+
+    return $update_state;
 }
 
-# we need the inline_constructor bit as we don't inherit from Moose
-__PACKAGE__->meta->make_immutable( inline_constructor => 0 );
+sub is_latest {
+    my $self = shift;
+    my $latest_update = $self->result_source->resultset->search(
+        { problem_id => $self->problem_id, state => 'confirmed' },
+        { order_by => [ { -desc => 'confirmed' }, { -desc => 'id' } ] }
+    )->first;
+    return $latest_update->id == $self->id;
+}
+
+sub hide {
+    my $self = shift;
+
+    my $ret = {};
+
+    # If we're hiding an update, see if it marked as fixed and unfix if so
+    if ($self->mark_fixed && $self->is_latest && $self->problem->state =~ /^fixed/) {
+        $self->problem->state('confirmed');
+        $self->problem->update;
+        $ret->{reopened} = 1;
+    }
+    $self->get_photoset->delete_cached;
+    $self->update({ state => 'hidden' });
+    return $ret;
+}
 
 1;

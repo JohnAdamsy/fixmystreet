@@ -1,8 +1,6 @@
-use strict;
-use warnings;
-use Test::More;
-
+use open ':std', ':locale';
 use FixMyStreet::TestMech;
+use FixMyStreet::App;
 
 my $mech = FixMyStreet::TestMech->new;
 
@@ -12,37 +10,35 @@ my $dt = DateTime->new(
     day     => 10
 );
 
-my $user1 = FixMyStreet::App->model('DB::User')
-  ->find_or_create( { email => 'reporter@example.com', name => 'Reporter User' } );
+my $user1 = $mech->create_user_ok('reporter-rss@example.com', name => 'Reporter User');
 
-my $report = FixMyStreet::App->model('DB::Problem')->find_or_create( {
+my $dt_parser = FixMyStreet::App->model('DB')->schema->storage->datetime_parser;
+
+my ($report) = $mech->create_problems_for_body(1, 2651, '', {
     postcode           => 'eh1 1BB',
-    council            => '2651',
     areas              => ',11808,135007,14419,134935,2651,20728,',
     category           => 'Street lighting',
-    title              => 'Testing',
+    title              => '&Test’i<n>g \'☃"',
     detail             => 'Testing Detail',
-    used_map           => 1,
     name               => $user1->name,
-    anonymous          => 0,
-    state              => 'confirmed',
-    confirmed          => $dt,
-    lastupdate         => $dt,
-    whensent           => $dt->clone->add( minutes => 5 ),
-    lang               => 'en-gb',
-    service            => '',
-    cobrand            => 'default',
-    cobrand_data       => '',
-    send_questionnaire => 1,
+    confirmed          => $dt_parser->format_datetime($dt),
+    lastupdate         => $dt_parser->format_datetime($dt),
+    whensent           => $dt_parser->format_datetime($dt->clone->add( minutes => 5 )),
     latitude           => '55.951963',
     longitude          => '-3.189944',
-    user_id            => $user1->id,
+    user => $user1,
 } );
 
-
-$mech->get_ok("/rss/pc/EH11BB/2");
-$mech->content_contains( "Testing, 10th October, EH1 1BB" );
+$mech->host('www.fixmystreet.com');
+FixMyStreet::override_config {
+    ALLOWED_COBRANDS => [ 'fixmystreet' ],
+    MAPIT_URL => 'http://mapit.uk/',
+}, sub {
+    $mech->get_ok("/rss/pc/EH11BB/2");
+};
+$mech->content_contains( "&amp;Test’i&lt;n&gt;g &#39;☃&quot;, 10th October" );
 $mech->content_lacks( 'Nearest road to the pin' );
+is $mech->response->header('Access-Control-Allow-Origin'), '*';
 
 $report->geocode( 
 {
@@ -106,20 +102,52 @@ $report->geocode(
           'authenticationResultCode' => 'ValidCredentials'
         }
 );
-$report->postcode('eh11bb');
 $report->update();
 
-$mech->get_ok("/rss/pc/EH11BB/2");
-$mech->content_contains( "Testing, 10th October, EH1 1BB" );
+FixMyStreet::override_config {
+    ALLOWED_COBRANDS => [ 'fixmystreet' ],
+    MAPIT_URL => 'http://mapit.uk/',
+}, sub {
+    $mech->get_ok("/rss/pc/EH11BB/2");
+};
+$mech->content_contains( "&amp;Test’i&lt;n&gt;g &#39;☃&quot;, 10th October" );
 $mech->content_contains( '18 North Bridge, Edinburgh' );
 
-$report->postcode('Princes St, Edinburgh');
-$report->update();
-
-$mech->get_ok("/rss/pc/EH11BB/2");
-$mech->content_contains( "Testing, 10th October, Princes St, Edinburgh" );
-
 $report->delete();
-$user1->delete();
+
+my $council = $mech->create_body_ok(2333, 'Hart Council');
+my $county = $mech->create_body_ok(2227, 'Hampshire Council');
+
+my ($report_to_council) = $mech->create_problems_for_body(1, $council->id, '', {
+        user => $user1,
+        areas              => ',2333,2227,',
+        latitude           => '51.279616',
+        longitude          => '-0.846040',
+});
+
+my ($report_to_county_council) = $mech->create_problems_for_body(1, $county->id, '', {
+        user => $user1,
+        areas              => ',2333,2227,',
+        latitude           => '51.279616',
+        longitude          => '-0.846040',
+});
+
+subtest "check RSS feeds on cobrand have correct URLs for non-cobrand reports" => sub {
+    $mech->host('hart.fixmystreet.com');
+    my $expected1 = FixMyStreet->config('BASE_URL') . '/report/' . $report_to_county_council->id;
+    my $expected2;
+
+    FixMyStreet::override_config {
+        ALLOWED_COBRANDS => [ 'hart' ],
+        MAPIT_URL => 'http://mapit.uk/',
+    }, sub {
+        $mech->get_ok("/rss/area/Hart");
+        my $cobrand = FixMyStreet::Cobrand->get_class_for_moniker('hart')->new();
+        $expected2 = $cobrand->base_url . '/report/' . $report_to_council->id;
+    };
+
+    $mech->content_contains($expected1, 'non cobrand area report point to fixmystreet.com');
+    $mech->content_contains($expected2, 'cobrand area report point to cobrand url');
+};
 
 done_testing();

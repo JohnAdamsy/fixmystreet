@@ -1,5 +1,3 @@
-#!/usr/bin/perl
-#
 # FixMyStreet:Map::FMS
 # Bing and OS StreetView maps on FixMyStreet, using OpenLayers.
 #
@@ -7,38 +5,21 @@
 # Email: matthew@mysociety.org; WWW: http://www.mysociety.org/
 
 package FixMyStreet::Map::FMS;
-use base 'FixMyStreet::Map::OSM';
+use base 'FixMyStreet::Map::Bing';
 
 use strict;
 
-# Is set by the JavaScript
-sub map_type {
-    return '""';
-}
+sub map_template { 'fms' }
 
-sub map_template {
-    return 'fms';
-}
-
-sub copyright {
-    return '';
-}
-
-sub get_quadkey {
-    my ($x, $y, $z) = @_;
-    my $key = '';
-    for (my $i = $z; $i > 0; $i--) {
-        my $digit = 0;
-        my $mask = 1 << ($i - 1);
-        $digit++ if ($x & $mask) != 0;
-        $digit += 2 if ($y & $mask) != 0;
-        $key .= $digit;
-    }
-    return $key;
-}
+sub map_javascript { [
+    '/vendor/OpenLayers/OpenLayers.fixmystreet.js',
+    '/js/map-OpenLayers.js',
+    '/js/map-bing-ol.js',
+    '/js/map-fms.js',
+] }
 
 sub map_tile_base {
-    '.', "http://%stilma.mysociety.org/sv/%d/%d/%d.png";
+    '-', "//%stilma.mysociety.org/sv/%d/%d/%d.png";
 }
 
 sub map_tiles {
@@ -54,13 +35,14 @@ sub map_tiles {
             sprintf($tile_base, '', $z, $x, $y),
         ];
     } else {
-        my $url = "g=701";
-        $url .= "&productSet=mmOS" if $z > 10 && !$ni;
+        my $key = FixMyStreet->config('BING_MAPS_API_KEY');
+        my $url = "g=5941";
+        $url .= "&productSet=mmOS&key=$key" if $z > 10 && !$ni;
         return [
-            "//ecn.t0.tiles.virtualearth.net/tiles/r" . get_quadkey($x-1, $y-1, $z) . ".png?$url",
-            "//ecn.t1.tiles.virtualearth.net/tiles/r" . get_quadkey($x,   $y-1, $z) . ".png?$url",
-            "//ecn.t2.tiles.virtualearth.net/tiles/r" . get_quadkey($x-1, $y,   $z) . ".png?$url",
-            "//ecn.t3.tiles.virtualearth.net/tiles/r" . get_quadkey($x,   $y,   $z) . ".png?$url",
+            "//ecn.t0.tiles.virtualearth.net/tiles/r" . $self->get_quadkey($x-1, $y-1, $z) . ".png?$url",
+            "//ecn.t1.tiles.virtualearth.net/tiles/r" . $self->get_quadkey($x,   $y-1, $z) . ".png?$url",
+            "//ecn.t2.tiles.virtualearth.net/tiles/r" . $self->get_quadkey($x-1, $y,   $z) . ".png?$url",
+            "//ecn.t3.tiles.virtualearth.net/tiles/r" . $self->get_quadkey($x,   $y,   $z) . ".png?$url",
         ];
     }
 }

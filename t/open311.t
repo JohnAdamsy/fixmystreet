@@ -1,18 +1,15 @@
 #!/usr/bin/env perl
 
-use strict;
-use warnings;
+use FixMyStreet::Test;
+use File::Temp 'tempdir';
+use Path::Tiny;
 use Test::More;
 use Test::Warn;
-use FixMyStreet::App;
+use FixMyStreet::DB;
 use CGI::Simple;
 use HTTP::Response;
 use DateTime;
 use DateTime::Format::W3CDTF;
-
-use FindBin;
-use lib "$FindBin::Bin/../perllib";
-use lib "$FindBin::Bin/../commonlib/perllib";
 
 use_ok( 'Open311' );
 
@@ -27,30 +24,39 @@ EOT
 is $o->_process_error( $err_text ), "400: Service Code cannot be null -- can't proceed with the request.\n", 'error text parsing';
 is $o->_process_error( '503 - service unavailable' ), 'unknown error', 'error text parsing of bad error';
 
-my $o2 = Open311->new( endpoint => 'http://192.168.50.1/open311/', jurisdiction => 'example.org' );
+my $o2 = Open311->new( endpoint => 'http://127.0.0.1/open311/', jurisdiction => 'example.org' );
 
-my $u = FixMyStreet::App->model('DB::User')->new( { email => 'test@example.org', name => 'A User' } );
+my $u = FixMyStreet::DB->resultset('User')->new( { email => 'test@example.org', name => 'A User' } );
 
-my $p = FixMyStreet::App->model('DB::Problem')->new( {
-    latitude => 1,
-    longitude => 1,
-    title => 'title',
-    detail => 'detail',
-    user => $u,
-} );
+for my $sfc (0..2) {
+    my $p = FixMyStreet::DB->resultset('Problem')->new( {
+        latitude => 1,
+        longitude => 1,
+        title => 'title',
+        detail => 'detail',
+        user => $u,
+        id => 1,
+        name => 'A User',
+        cobrand => 'fixmystreet',
+        send_fail_count => $sfc,
+    } );
+    my $expected_error = qr{Failed to submit problem 1 over Open311}ism;
 
-my $expected_error = qr{.*request failed: 500 Can.t connect to 192.168.50.1:80 \([^)]*\).*};
-
-warning_like {$o2->send_service_request( $p, { url => 'http://example.com/' }, 1 )} $expected_error, 'warning generated on failed call';
+    if ($sfc == 1) {
+        warning_like {$o2->send_service_request( $p, { url => 'http://example.com/' }, 1 )} $expected_error, 'warning generated on failed call';
+    } else {
+        warning_like {$o2->send_service_request( $p, { url => 'http://example.com/' }, 1 )} undef, 'no warning generated on failed call';
+    }
+}
 
 my $dt = DateTime->now();
 
-my $user = FixMyStreet::App->model('DB::User')->new( {
+my $user = FixMyStreet::DB->resultset('User')->new( {
     name => 'Test User',
     email => 'test@example.com',
 } );
 
-my $problem = FixMyStreet::App->model('DB::Problem')->new( {
+my $problem = FixMyStreet::DB->resultset('Problem')->new( {
     id => 80,
     external_id => 81,
     state => 'confirmed',
@@ -60,18 +66,19 @@ my $problem = FixMyStreet::App->model('DB::Problem')->new( {
     latitude => 1,
     longitude => 2,
     user => $user,
+    name => 'Test User',
+    cobrand => 'fixmystreet',
 } );
 
 subtest 'posting service request' => sub {
     my $extra = {
         url => 'http://example.com/report/1',
+        easting => 'SET',
     };
 
     my $results = make_service_req( $problem, $extra, $problem->category, '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>' );
 
     is $results->{ res }, 248, 'got request id';
-
-    my $req = $o->test_req_used;
 
     my $description = <<EOT;
 title: a problem
@@ -85,13 +92,14 @@ EOT
 ;
 
     my $c = CGI::Simple->new( $results->{ req }->content );
+    (my $c_description = $c->param('description')) =~ s/\r\n/\n/g;
 
     is $c->param('email'), $user->email, 'correct email';
     is $c->param('first_name'), 'Test', 'correct first name';
     is $c->param('last_name'), 'User', 'correct last name';
     is $c->param('lat'), 1, 'latitide correct';
     is $c->param('long'), 2, 'longitude correct';
-    is $c->param('description'), $description, 'description correct';
+    is $c_description, $description, 'description correct';
     is $c->param('service_code'), 'pothole', 'service code correct';
 };
 
@@ -105,12 +113,10 @@ subtest 'posting service request with basic_description' => sub {
         $extra,
         $problem->category,
         '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>',
-        { basic_description => 1 },
+        { extended_description => 0 },
     );
 
     is $results->{ res }, 248, 'got request id';
-
-    my $req = $o->test_req_used;
 
     my $c = CGI::Simple->new( $results->{ req }->content );
 
@@ -127,8 +133,38 @@ for my $test (
             }
         ],
         params => [
-            [ 'attribute[title]', 'A title', 'extra paramater used correctly' ]
-        ]
+            [ 'attribute[title]', 'A title', 'extra parameter used correctly' ]
+        ],
+        debug_contains => 'attribute\[title\]: A title',
+    },
+    {
+        desc  => 'undef extra values handled',
+        extra => [
+            {
+                name  => 'title',
+                value => undef,
+            }
+        ],
+        params => [
+            [ 'attribute[title]', '', 'undef extra parameter used correctly' ]
+        ],
+        # multi line warnings are not handled well so just match the
+        # first line
+        warning => qr/POST requests.xml/,
+        debug_contains => 'attribute\[title\]: $',
+    },
+    {
+        desc  => '0 extra values handled',
+        extra => [
+            {
+                name  => 'title',
+                value => 0,
+            }
+        ],
+        params => [
+            [ 'attribute[title]', '0', '0 extra parameter used correctly' ]
+        ],
+        debug_contains => 'attribute\[title\]: 0',
     },
     {
         desc  => 'first and last names in extra used correctly',
@@ -150,7 +186,7 @@ for my $test (
         ],
     },
     {
-        title => 'magic fms_extra parameters handled correctly',
+        desc => 'magic fms_extra parameters handled correctly',
         extra => [
             {
                 name  => 'fms_extra_title',
@@ -172,11 +208,23 @@ for my $test (
 
         my $extra = { url => 'http://example.com/report/1', };
 
-        my $results = make_service_req( $problem, $extra, $problem->category,
-'<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>'
-        );
-        my $req = $o->test_req_used;
+        my $results;
+        if ( $test->{warning} ) {
+            warnings_exist {
+                $results = make_service_req( $problem, $extra, $problem->category,
+                '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>'
+                );
+            } [ $test->{warning} ], 'warning generated by service request call';
+        } else {
+            $results = make_service_req( $problem, $extra, $problem->category,
+            '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>'
+            );
+        }
         my $c   = CGI::Simple->new( $results->{req}->content );
+
+        if ( $test->{debug_contains} ) {
+            like $results->{o}->debug_details, qr/$test->{debug_contains}/m, 'extra handled correctly in debug';
+        }
 
         for my $param ( @{ $test->{params} } ) {
             is $c->param( $param->[0] ), $param->[1], $param->[2];
@@ -184,13 +232,44 @@ for my $test (
     };
 }
 
-my $comment = FixMyStreet::App->model('DB::Comment')->new( {
+for my $test ( 
+    {
+        desc => 'Check uses report name over user name',
+        name => 'Nom de Report',
+        first_name => 'Nom',
+        last_name => 'de Report',
+    },
+    {
+        desc => 'Check single word name handled correctly',
+        name => 'Nom',
+        first_name => 'Nom',
+        last_name => '',
+    }
+) {
+    subtest $test->{desc} => sub {
+        $problem->extra( undef );
+        $problem->name( $test->{name} );
+        my $extra = { url => 'http://example.com/report/1', };
+
+        my $results = make_service_req( $problem, $extra, $problem->category,
+'<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>'
+        );
+        my $c   = CGI::Simple->new( $results->{req}->content );
+
+        is $c->param( 'first_name' ), $test->{first_name}, 'correct first name';
+        is $c->param( 'last_name' ), $test->{last_name}, 'correct last name';
+    };
+}
+
+
+my $comment = FixMyStreet::DB->resultset('Comment')->new( {
     id => 38362,
     user => $user,
     problem => $problem,
     anonymous => 0,
     text => 'this is a comment',
     confirmed => $dt,
+    problem_state => 'confirmed',
     extra => { title => 'Mr', email_alerts_requested => 0 },
 } );
 
@@ -199,7 +278,23 @@ subtest 'basic request update post parameters' => sub {
 
     is $results->{ res }, 248, 'got update id';
 
-    my $req = $o->test_req_used;
+    my $c = CGI::Simple->new( $results->{ req }->content );
+
+    is $c->param('description'), 'this is a comment', 'email correct';
+    is $c->param('email'), 'test@example.com', 'email correct';
+    is $c->param('status'), 'OPEN', 'status correct';
+    is $c->param('service_request_id'), 81, 'request id correct';
+    is $c->param('updated_datetime'), DateTime::Format::W3CDTF->format_datetime($dt), 'correct date';
+    is $c->param('title'), 'Mr', 'correct title';
+    is $c->param('last_name'), 'User', 'correct first name';
+    is $c->param('first_name'), 'Test', 'correct second name';
+    is $c->param('media_url'), undef, 'no media url';
+};
+
+subtest 'extended request update post parameters' => sub {
+    my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>', { use_extended_updates => 1 } );
+
+    is $results->{ res }, 248, 'got update id';
 
     my $c = CGI::Simple->new( $results->{ req }->content );
 
@@ -218,60 +313,127 @@ subtest 'basic request update post parameters' => sub {
 };
 
 subtest 'check media url set' => sub {
-    $comment->photo(1);
+    my $UPLOAD_DIR = tempdir( CLEANUP => 1 );
+
+    my $image_path = path('t/app/controller/sample.jpg');
+    $image_path->copy( path( $UPLOAD_DIR, '0123456789012345678901234567890123456789.jpeg' ) );
+
+    $comment->photo("0123456789012345678901234567890123456789");
     $comment->cobrand('fixmystreet');
 
-    my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>' );
+    FixMyStreet::override_config {
+        UPLOAD_DIR => $UPLOAD_DIR,
+    }, sub {
+        my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>' );
 
-    is $results->{ res }, 248, 'got update id';
+        is $results->{ res }, 248, 'got update id';
 
-    my $req = $o->test_req_used;
-
-    my $c = CGI::Simple->new( $results->{ req }->content );
-    my $expected_path = '/c/' . $comment->id . '.full.jpeg';
-    like $c->param('media_url'), qr/$expected_path/, 'image url included';
+        my $c = CGI::Simple->new( $results->{ req }->content );
+        my $expected_path = '/c/' . $comment->id . '.0.full.jpeg';
+        like $c->param('media_url'), qr/$expected_path/, 'image url included';
+    };
+    $comment->photo(undef);
 };
 
 foreach my $test (
     {
         desc => 'comment with fixed state sends status of CLOSED',
         state => 'fixed',
-        anon  => 0,
         status => 'CLOSED',
+        extended => 'FIXED',
     },
     {
         desc => 'comment with fixed - user state sends status of CLOSED',
         state => 'fixed - user',
-        anon  => 0,
         status => 'CLOSED',
+        extended => 'FIXED',
     },
     {
         desc => 'comment with fixed - council state sends status of CLOSED',
         state => 'fixed - council',
+        status => 'CLOSED',
+        extended => 'FIXED',
+    },
+    {
+        desc => 'comment with duplicate state sends status of CLOSED',
+        state => 'duplicate',
         anon  => 0,
         status => 'CLOSED',
+        extended => 'DUPLICATE',
+    },
+    {
+        desc => 'comment with not reponsible state sends status of CLOSED',
+        state => 'not responsible',
+        anon  => 0,
+        status => 'CLOSED',
+        extended => 'NOT_COUNCILS_RESPONSIBILITY',
+    },
+    {
+        desc => 'comment with unable to fix state sends status of CLOSED',
+        state => 'unable to fix',
+        anon  => 0,
+        status => 'CLOSED',
+        extended => 'NO_FURTHER_ACTION',
+    },
+    {
+        desc => 'comment with internal referral state sends status of CLOSED',
+        state => 'internal referral',
+        anon  => 0,
+        status => 'CLOSED',
+        extended => 'INTERNAL_REFERRAL',
     },
     {
         desc => 'comment with closed state sends status of CLOSED',
         state => 'closed',
-        anon  => 0,
         status => 'CLOSED',
     },
     {
         desc => 'comment with investigating state sends status of OPEN',
         state => 'investigating',
-        anon  => 0,
         status => 'OPEN',
+        extended => 'INVESTIGATING',
     },
     {
         desc => 'comment with planned state sends status of OPEN',
         state => 'planned',
+        status => 'OPEN',
+        extended => 'ACTION_SCHEDULED',
+    },
+    {
+        desc => 'comment with action scheduled state sends status of OPEN',
+        state => 'action scheduled',
         anon  => 0,
         status => 'OPEN',
+        extended => 'ACTION_SCHEDULED',
     },
     {
         desc => 'comment with in progress state sends status of OPEN',
         state => 'in progress',
+        status => 'OPEN',
+        extended => 'IN_PROGRESS',
+    },
+) {
+    subtest $test->{desc} => sub {
+        $comment->problem_state( $test->{state} );
+        $comment->problem->state( $test->{state} );
+
+        my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>' );
+
+        my $c = CGI::Simple->new( $results->{ req }->content );
+        is $c->param('status'), $test->{status}, 'correct status';
+
+        if ( $test->{extended} ) {
+            my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>', { extended_statuses => 1 } );
+            my $c = CGI::Simple->new( $results->{ req }->content );
+            is $c->param('status'), $test->{extended}, 'correct extended status';
+        }
+    };
+}
+
+for my $test (
+    {
+        desc => 'public comment sets public_anonymity_required to false',
+        state => 'confirmed',
         anon  => 0,
         status => 'OPEN',
     },
@@ -283,14 +445,67 @@ foreach my $test (
     },
 ) {
     subtest $test->{desc} => sub {
+        $comment->problem_state( $test->{state} );
         $comment->problem->state( $test->{state} );
         $comment->anonymous( $test->{anon} );
 
+        my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>', { use_extended_updates => 1 } );
+
+        my $c = CGI::Simple->new( $results->{ req }->content );
+        is $c->param('public_anonymity_required'), $test->{anon} ? 'TRUE' : 'FALSE', 'correct anonymity';
+    };
+}
+
+my $dt2 = $dt->clone;
+$dt2->add( 'minutes' => 1 );
+
+my $comment2 = FixMyStreet::DB->resultset('Comment')->new( {
+    id => 38363,
+    user => $user,
+    problem => $problem,
+    anonymous => 0,
+    text => 'this is a comment',
+    confirmed => $dt,
+    problem_state => 'confirmed',
+    extra => { title => 'Mr', email_alerts_requested => 0 },
+} );
+
+for my $test (
+    {
+        desc => 'comment with fixed - council state sends status of CLOSED even if problem is open',
+        state => 'fixed - council',
+        problem_state => 'confirmed',
+        status => 'CLOSED',
+        extended => 'FIXED',
+    },
+    {
+        desc => 'comment marked open sends status of OPEN even if problem is closed',
+        state => 'confirmed',
+        problem_state => 'fixed - council',
+        status => 'OPEN',
+        extended => 'OPEN',
+    },
+    {
+        desc => 'comment with no problem state falls back to report state',
+        state => '',
+        problem_state => 'fixed - council',
+        status => 'CLOSED',
+        extended => 'FIXED',
+    },
+) {
+    subtest $test->{desc} => sub {
+        $comment->problem_state( $test->{state} );
+        $comment->problem->state( $test->{problem_state} );
         my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>' );
 
         my $c = CGI::Simple->new( $results->{ req }->content );
         is $c->param('status'), $test->{status}, 'correct status';
-        is $c->param('public_anonymity_required'), $test->{anon} ? 'TRUE' : 'FALSE', 'correct anonymity';
+
+        if ( $test->{extended} ) {
+            my $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id>248</update_id></request_update></service_request_updates>', { extended_statuses => 1 } );
+            my $c = CGI::Simple->new( $results->{ req }->content );
+            is $c->param('status'), $test->{extended}, 'correct extended status';
+        }
     };
 }
 
@@ -316,7 +531,7 @@ for my $test (
         desc         => 'update name taken from extra if available',
         comment_name => 'First Last',
         user_name    => 'Personal Family',
-        extra        => { first_name => 'Forename', last_name => 'Surname' },
+        extra        => { first_name => 'Forename', last_name => 'Surname', title => 'Ms' },
         first_name   => 'Forename',
         last_name    => 'Surname'
     },
@@ -410,38 +625,139 @@ for my $test (
     };
 }
 
+$problem->send_fail_count(1);
+$comment->send_fail_count(1);
+
+subtest 'No request id in reponse' => sub {
+    my $results;
+    warning_like {
+        $results = make_service_req(
+            $problem,
+            { url => 'http://example.com/report/1' },
+            $problem->category,
+            '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id></service_request_id></request></service_requests>' 
+        );
+    } qr/Failed to submit problem \d+ over Open311/, 'correct error message for missing request_id';
+
+    is $results->{ res }, 0, 'No request_id is a failure';
+};
+
+subtest 'Bad data in request_id element in reponse' => sub {
+    my $results;
+    warning_like {
+        $results = make_service_req(
+            $problem,
+            { url => 'http://example.com/report/1' },
+            $problem->category,
+            '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id><bad_data>BAD</bad_data></service_request_id></request></service_requests>' 
+        );
+    } qr/Failed to submit problem \d+ over Open311/, 'correct error message for bad data in request_id';
+
+    is $results->{ res }, 0, 'No request_id is a failure';
+};
+
 subtest 'No update id in reponse' => sub {
     my $results;
     warning_like {
         $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><service_request_updates><request_update><update_id></update_id></request_update></service_request_updates>' )
-    } qr/Failed to submit comment \d+ over Open311/, 'correct error message';
+    } qr/Failed to submit comment \d+ over Open311/, 'correct error message for missing update_id';
 
     is $results->{ res }, 0, 'No update_id is a failure';
 };
 
-subtest 'error reponse' => sub {
+subtest 'error response' => sub {
     my $results;
     warning_like {
         $results = make_update_req( $comment, '<?xml version="1.0" encoding="utf-8"?><errors><error><code>400</code><description>There was an error</description</error></errors>' )
-    } qr/Failed to submit comment \d+ over Open311.*There was an error/, 'correct error messages';
+    } qr/Failed to submit comment \d+ over Open311.*There was an error/, 'correct error messages for general error';
 
     is $results->{ res }, 0, 'error in response is a failure';
 };
 
+for my $test (
+    {
+        desc              => 'deviceid not sent by default',
+        use_service_as_id => 0,
+        service           => 'iPhone',
+    },
+    {
+        desc              => 'if use_service_as_id set then deviceid sent with service as id',
+        use_service_as_id => 1,
+        service           => 'iPhone',
+    },
+    {
+        desc              => 'no deviceid sent if service is blank',
+        use_service_as_id => 1,
+        service           => '',
+    },
+  )
+{
+    subtest $test->{desc} => sub {
+        my $extra = { url => 'http://example.com/report/1', };
+        $problem->service( $test->{service} );
+
+        my $results = make_service_req(
+            $problem,
+            $extra,
+            $problem->category,
+            '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>',
+            { use_service_as_deviceid => $test->{use_service_as_id} },
+        );
+
+        is $results->{res}, 248, 'got request id';
+
+        my $c = CGI::Simple->new( $results->{req}->content );
+
+        if ( $test->{use_service_as_id} and $test->{service} ) {
+            is $c->param('deviceid'), $test->{service}, 'deviceid set to service';
+        }
+        else {
+            is $c->param('deviceid'), undef, 'no deviceid is set';
+        }
+    };
+}
+
+subtest 'check FixaMinGata' => sub {
+    $problem->cobrand('fixamingata');
+    $problem->detail("MØØse");
+    my $extra = {
+        url => 'http://example.com/report/1',
+    };
+    my $results = make_service_req( $problem, $extra, $problem->category, '<?xml version="1.0" encoding="utf-8"?><service_requests><request><service_request_id>248</service_request_id></request></service_requests>' );
+    is $results->{ res }, 248, 'got request id';
+    my $description = <<EOT;
+Titel: a problem
+
+Beskrivning: MØØse
+
+Länk till ärendet: http://example.com/report/1
+
+Skickad via FixaMinGata
+EOT
+;
+    my $c = CGI::Simple->new( $results->{ req }->content );
+    (my $c_description = $c->param('description')) =~ s/\r\n/\n/g;
+    utf8::decode($c_description);
+    is $c_description, $description, 'description correct';
+};
+
 done_testing();
+
 
 sub make_update_req {
     my $comment = shift;
     my $xml = shift;
+    my $open311_args = shift || {};
 
-    return make_req(
-        {
-            object => $comment,
-              xml  => $xml,
-            method => 'post_service_request_update',
-            path   => 'update.xml',
-        }
-    );
+    my $params = {
+        object       => $comment,
+        xml          => $xml,
+        method       => 'post_service_request_update',
+        path         => 'servicerequestupdates.xml',
+        open311_conf => $open311_args,
+    };
+
+    return _make_req( $params );
 }
 
 sub make_service_req {
@@ -451,7 +767,7 @@ sub make_service_req {
     my $xml          = shift;
     my $open311_args = shift || {};
 
-    return make_req(
+    return _make_req(
         {
             object       => $problem,
             xml          => $xml,
@@ -463,7 +779,7 @@ sub make_service_req {
     );
 }
 
-sub make_req {
+sub _make_req {
     my $args = shift;
 
     my $object       = $args->{object};
@@ -489,5 +805,5 @@ sub make_req {
 
     my $req = $o->test_req_used;
 
-    return { res => $res, req => $req };
+    return { res => $res, req => $req, o => $o };
 }

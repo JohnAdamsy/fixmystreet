@@ -1,0 +1,22 @@
+[% global.last_state = '' %]
+[% FOREACH update IN updates %]
+[%- IF global.last_state == 'hidden' OR global.last_state == 'unconfirmed' OR update.problem_state == 'hidden' OR update.problem_state == 'unconfirmed' %]
+  [%- IF update.problem_state != '' %]
+  [%- global.last_state = update.problem_state %]
+  [%- END %]
+  [%- NEXT %]
+[%- END %]
+[% INCLUDE 'report/update.html' %]
+[% END %]
+
+[% BLOCK meta_line %]
+
+    [% IF update.whenanswered %]
+        [%# A questionnaire update, currently saying report is still open %]
+        [% loc('Still open, via questionnaire') %], [% prettify_dt( update.whenanswered ) %]
+        [% RETURN %]
+    [% END %]
+
+    [% update.meta_line(c) %]
+
+[% END %]

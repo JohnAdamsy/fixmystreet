@@ -4,8 +4,6 @@
 -- Copyright (c) 2006 UK Citizens Online Democracy. All rights reserved.
 -- Email: matthew@mysociety.org; WWW: http://www.mysociety.org/
 --
--- $Id: schema.sql,v 1.49 2009-11-10 13:53:33 louise Exp $
---
 
 -- secret
 -- A random secret.
@@ -13,65 +11,80 @@ create table secret (
     secret text not null
 );
 
--- If a row is present, that is date which is "today".  Used for debugging
--- to advance time without having to wait.
-create table debugdate (
-    override_today date
+-- table for sessions - needed by Catalyst::Plugin::Session::Store::DBIC
+create table sessions (
+    id           char(72) primary key,
+    session_data text,
+    expires      integer
 );
 
--- Returns the date of "today", which can be overriden for testing.
-create function ms_current_date()
-    returns date as '
-    declare
-        today date;
-    begin
-        today = (select override_today from debugdate);
-        if today is not null then
-           return today;
-        else
-           return current_date;
-        end if;
+-- users table
+create table users (
+    id              serial  not null primary key,
+    email           text,
+    email_verified  boolean not null default 'f',
+    name            text,
+    phone           text,
+    phone_verified  boolean not null default 'f',
+    password        text    not null default '',
+    from_body       integer,
+    flagged         boolean not null default 'f',
+    is_superuser    boolean not null default 'f',
+    created         timestamp not null default current_timestamp,
+    last_active     timestamp not null default current_timestamp,
+    title           text,
+    twitter_id      bigint  unique,
+    facebook_id     bigint  unique,
+    area_id         integer,
+    extra           text
+);
+CREATE UNIQUE INDEX users_email_verified_unique ON users (email) WHERE email_verified;
+CREATE UNIQUE INDEX users_phone_verified_unique ON users (phone) WHERE phone_verified;
 
-    end;
-' language 'plpgsql' stable;
+-- Record details of reporting bodies, including open311 configuration details
+create table body (
+    id           serial primary key,
+    name         text not null,
+    external_url text,
+    parent       integer references body(id),
+    endpoint     text,
+    jurisdiction text,
+    api_key      text,
+    send_method  text,
+    send_comments boolean not null default 'f',
+    comment_user_id int references users(id),
+    suppress_alerts boolean not null default 'f',
+    can_be_devolved boolean not null default 'f',
+    send_extended_statuses boolean not null default 'f',
+    fetch_problems boolean not null default 'f',
+    blank_updates_permitted boolean not null default 'f',
+    convert_latlong boolean not null default 'f',
+    deleted boolean not null default 'f',
+    extra           text
+);
 
--- Returns the timestamp of current time, but with possibly overriden "today".
-create function ms_current_timestamp()
-    returns timestamp as '
-    declare
-        today date;
-    begin
-        today = (select override_today from debugdate);
-        if today is not null then
-           return today + current_time;
-        else
-           return current_timestamp;
-        end if;
-    end;
-' language 'plpgsql';
+create table body_areas (
+    body_id integer not null references body(id),
+    area_id integer not null
+);
+create unique index body_areas_body_id_area_id_idx on body_areas(body_id, area_id);
 
+-- Now can create reference from users to body
+ALTER TABLE users ADD CONSTRAINT users_from_body_fkey
+    FOREIGN KEY (from_body) REFERENCES body(id);
 
--- users, but call the table person rather than user so we don't have to quote
--- its name in every statement....
--- create table person (
---     id serial not null primary key,
---     name text,
---     email text not null,
---     password text,
---     website text,
---     numlogins integer not null default 0
--- );
--- 
--- create unique index person_email_idx on person(email);
-
--- Who to send problems for a specific MaPit area ID to
+-- The contact for a category within a particular body
 create table contacts (
     id serial primary key,
-    area_id integer not null,
+    body_id integer not null references body(id),
     category text not null default 'Other',
     email text not null,
-    confirmed boolean not null,
-    deleted boolean not null,
+    state text not null check (
+        state = 'unconfirmed'
+        or state = 'confirmed'
+        or state = 'inactive'
+        or state = 'deleted'
+    ),
 
     -- last editor
     editor text not null,
@@ -81,9 +94,18 @@ create table contacts (
     note text not null,
 
     -- extra fields required for open311
-    extra text
+    extra text,
+
+    -- for things like missed bin collections
+    non_public boolean default 'f',
+
+    -- per contact endpoint configuration
+    endpoint     text,
+    jurisdiction text default '',
+    api_key      text default '',
+    send_method  text
 );
-create unique index contacts_area_id_category_idx on contacts(area_id, category);
+create unique index contacts_body_id_category_idx on contacts(body_id, category);
 
 -- History of changes to contacts - automatically updated
 -- whenever contacts is changed, using trigger below.
@@ -91,11 +113,15 @@ create table contacts_history (
     contacts_history_id serial not null primary key,
 
     contact_id integer not null,
-    area_id integer not null,
+    body_id integer not null,
     category text not null default 'Other',
     email text not null,
-    confirmed boolean not null,
-    deleted boolean not null,
+    state text not null check (
+        state = 'unconfirmed'
+        or state = 'confirmed'
+        or state = 'inactive'
+        or state = 'deleted'
+    ),
 
     -- editor
     editor text not null,
@@ -110,7 +136,7 @@ create table contacts_history (
 create function contacts_updated()
     returns trigger as '
     begin
-        insert into contacts_history (contact_id, area_id, category, email, editor, whenedited, note, confirmed, deleted) values (new.id, new.area_id, new.category, new.email, new.editor, new.whenedited, new.note, new.confirmed, new.deleted);
+        insert into contacts_history (contact_id, body_id, category, email, editor, whenedited, note, state) values (new.id, new.body_id, new.category, new.email, new.editor, new.whenedited, new.note, new.state);
         return new;
     end;
 ' language 'plpgsql';
@@ -120,23 +146,16 @@ create trigger contacts_update_trigger after update on contacts
 create trigger contacts_insert_trigger after insert on contacts
     for each row execute procedure contacts_updated();
 
--- table for sessions - needed by Catalyst::Plugin::Session::Store::DBIC
-create table sessions (
-    id           char(72) primary key,
-    session_data text,
-    expires      integer
-);
-
--- users table
-create table users (
-    id              serial  not null primary key,
-    email           text    not null unique,
-    name            text,
-    phone           text,
-    password        text    not null default '',
-    from_council    integer, -- id of council user is from or null/0 if not
-    flagged         boolean not null default 'f',
-    title           text
+-- Problems can have priorities. This table must be created before problem.
+CREATE TABLE response_priorities (
+    id serial not null primary key,
+    body_id int references body(id) not null,
+    deleted boolean not null default 'f',
+    name text not null,
+    description text,
+    external_id text,
+    is_default boolean not null default 'f',
+    unique(body_id, name)
 );
 
 -- Problems reported by users of site
@@ -147,8 +166,9 @@ create table problem (
     postcode text not null,
     latitude double precision not null,
     longitude double precision not null,
-    council text, -- the council(s) we'll report this problem to
-    areas text not null, -- the voting areas this location is in
+    bodies_str text, -- the body(s) we'll report this problem to
+    bodies_missing text, -- the body(s) we had no contact details for
+    areas text not null, -- the mapit areas this location is in
     category text not null default 'Other',
     title text not null,
     detail text not null,
@@ -166,42 +186,47 @@ create table problem (
     external_team text,
 
     -- Metadata
-    created timestamp not null default ms_current_timestamp(),
+    created timestamp not null default current_timestamp,
     confirmed timestamp,
-    state text not null check (
-        state = 'unconfirmed'
-        or state = 'confirmed'
-        or state = 'investigating'
-        or state = 'planned'
-        or state = 'in progress'
-        or state = 'closed'
-        or state = 'fixed'
-        or state = 'fixed - council'
-        or state = 'fixed - user'
-        or state = 'hidden'
-        or state = 'partial'
-    ),
+    state text not null,
     lang text not null default 'en-gb',
     service text not null default '',
-    cobrand text not null default '' check (cobrand ~* '^[a-z0-9]*$'), 
-    cobrand_data text not null default '' check (cobrand_data ~* '^[a-z0-9]*$'), -- Extra data used in cobranded versions of the site
-    lastupdate timestamp not null default ms_current_timestamp(),
+    cobrand text not null default '' check (cobrand ~* '^[a-z0-9_]*$'),
+    cobrand_data text not null default '' check (cobrand_data ~* '^[a-z0-9_]*$'), -- Extra data used in cobranded versions of the site
+    lastupdate timestamp not null default current_timestamp,
     whensent timestamp,
     send_questionnaire boolean not null default 't',
     extra text, -- extra fields required for open311
     flagged boolean not null default 'f',
     geocode bytea,
-    
+    response_priority_id int REFERENCES response_priorities(id),
+
     -- logging sending failures (used by webservices)
     send_fail_count integer not null default 0, 
     send_fail_reason text, 
     send_fail_timestamp timestamp,
     
     -- record send_method used, which can be used to infer usefulness of external_id
-    send_method_used text
+    send_method_used text,
+
+    -- for things like missed bin collections
+    non_public BOOLEAN default 'f',
+
+    -- record details about messages from external sources, eg. message manager
+    external_source text,
+    external_source_id text,
+
+    -- number of me toos
+    interest_count integer default 0,
+
+    -- subcategory to enable filtering in reporting --
+    subcategory text
 );
 create index problem_state_latitude_longitude_idx on problem(state, latitude, longitude);
 create index problem_user_id_idx on problem ( user_id );
+create index problem_external_body_idx on problem(lower(external_body));
+create index problem_radians_latitude_longitude_idx on problem(radians(latitude), radians(longitude));
+create index problem_bodies_str_array_idx on problem USING gin(regexp_split_to_array(bodies_str, ','));
 
 create table questionnaire (
     id serial not null primary key,
@@ -217,17 +242,6 @@ create table questionnaire (
 );
 
 create index questionnaire_problem_id_idx on questionnaire using btree (problem_id);
-
--- angle_between A1 A2
--- Given two angles A1 and A2 on a circle expressed in radians, return the
--- smallest angle between them.
-create function angle_between(double precision, double precision)
-    returns double precision as '
-select case
-    when abs($1 - $2) > pi() then 2 * pi() - abs($1 - $2)
-    else abs($1 - $2)
-    end;
-' language sql immutable;
 
 -- R_e
 -- Radius of the earth, in km. This is something like 6372.8 km:
@@ -250,11 +264,11 @@ create function problem_find_nearby(double precision, double precision, double p
     -- table or results set in memory. That means we can't check the values of
     -- the parameters, sadly.
     -- Through sheer laziness, just use great-circle distance; that'll be off
-    -- by ~0.1%:
-    --  http://www.ga.gov.au/nmd/geodesy/datums/distance.jsp
+    -- by ~0.1%.
     -- We index locations on lat/lon so that we can select the locations which lie
     -- within a wedge of side about 2 * DISTANCE. That cuts down substantially
     -- on the amount of work we have to do.
+    -- http://janmatuschek.de/LatitudeLongitudeBoundingCoordinates
 '
     -- trunc due to inaccuracies in floating point arithmetic
     select problem.id,
@@ -268,9 +282,13 @@ create function problem_find_nearby(double precision, double precision, double p
             longitude is not null and latitude is not null
             and radians(latitude) > radians($1) - ($3 / R_e())
             and radians(latitude) < radians($1) + ($3 / R_e())
-            and (abs(radians($1)) + ($3 / R_e()) > pi() / 2     -- case where search pt is near pole
-                    or angle_between(radians(longitude), radians($2))
-                            < $3 / (R_e() * cos(radians($1 + $3 / R_e()))))
+            and (
+                abs(radians($1)) + ($3 / R_e()) > pi() / 2     -- case where search pt is near pole
+                or (
+                        radians(longitude) > radians($2) - asin(sin($3 / R_e())/cos(radians($1)))
+                    and radians(longitude) < radians($2) + asin(sin($3 / R_e())/cos(radians($1)))
+                )
+            )
             -- ugly -- unable to use attribute name "distance" here, sadly
             and R_e() * acos(trunc(
                 (sin(radians($1)) * sin(radians(latitude))
@@ -278,7 +296,7 @@ create function problem_find_nearby(double precision, double precision, double p
                     * cos(radians($2 - longitude)))::numeric, 14)
                 ) < $3
         order by distance desc
-' language sql; -- should be "stable" rather than volatile per default?
+' language sql stable;
 
 
 -- Comments/q&a on problems.
@@ -289,7 +307,7 @@ create table comment (
     anonymous bool not null,
     name text, -- null means anonymous
     website text,
-    created timestamp not null default ms_current_timestamp(),
+    created timestamp not null default current_timestamp,
     confirmed timestamp,
     text text not null,                     -- as entered by comment author
     photo bytea,
@@ -298,21 +316,12 @@ create table comment (
         or state = 'confirmed'
         or state = 'hidden'
     ),
-    cobrand text not null default '' check (cobrand ~* '^[a-z0-9]*$'), 
+    cobrand text not null default '' check (cobrand ~* '^[a-z0-9_]*$'),
     lang text not null default 'en-gb',
-    cobrand_data text not null default '' check (cobrand_data ~* '^[a-z0-9]*$'), -- Extra data used in cobranded versions of the site
+    cobrand_data text not null default '' check (cobrand_data ~* '^[a-z0-9_]*$'), -- Extra data used in cobranded versions of the site
     mark_fixed boolean not null,
     mark_open boolean not null default 'f',
-    problem_state text check (
-        problem_state = 'confirmed'
-        or problem_state = 'investigating'
-        or problem_state = 'planned'
-        or problem_state = 'in progress'
-        or problem_state = 'closed'
-        or problem_state = 'fixed'
-        or problem_state = 'fixed - council'
-        or problem_state = 'fixed - user'
-    ),
+    problem_state text,
     -- other fields? one to indicate whether this was written by the council
     -- and should be highlighted in the display?
     external_id text,
@@ -332,7 +341,7 @@ create table token (
     scope text not null,
     token text not null,
     data bytea not null,
-    created timestamp not null default ms_current_timestamp(),
+    created timestamp not null default current_timestamp,
     primary key (scope, token)
 );
 
@@ -362,9 +371,9 @@ create table alert (
     user_id int references users(id) not null,
     confirmed integer not null default 0,
     lang text not null default 'en-gb',
-    cobrand text not null default '' check (cobrand ~* '^[a-z0-9]*$'), 
-    cobrand_data text not null default '' check (cobrand_data ~* '^[a-z0-9]*$'), -- Extra data used in cobranded versions of the site
-    whensubscribed timestamp not null default ms_current_timestamp(),
+    cobrand text not null default '' check (cobrand ~* '^[a-z0-9_]*$'),
+    cobrand_data text not null default '' check (cobrand_data ~* '^[a-z0-9_]*$'), -- Extra data used in cobranded versions of the site
+    whensubscribed timestamp not null default current_timestamp,
     whendisabled timestamp default null
 );
 create index alert_user_id_idx on alert ( user_id );
@@ -376,7 +385,7 @@ create index alert_whensubscribed_confirmed_cobrand_idx on alert(whensubscribed,
 create table alert_sent (
     alert_id integer not null references alert(id),
     parameter text, -- e.g. Update ID for new updates
-    whenqueued timestamp not null default ms_current_timestamp()
+    whenqueued timestamp not null default current_timestamp
 );
 create index alert_sent_alert_id_parameter_idx on alert_sent(alert_id, parameter);
 
@@ -420,23 +429,108 @@ create table admin_log (
       or object_type = 'user'
     ),
     object_id integer not null,
-    action text not null check (
-        action = 'edit'
-        or action = 'state_change' 
-        or action = 'resend'),
-    whenedited timestamp not null default ms_current_timestamp()
+    action text not null,
+    whenedited timestamp not null default current_timestamp,
+    user_id int references users(id) null,
+    reason text not null default '',
+    time_spent int not null default 0
 ); 
 
--- Record open 311 configuration details
+create table moderation_original_data (
+    id serial not null primary key,
 
-create table open311conf (
-    id           serial primary key,
-    area_id      integer not null unique,
-    endpoint     text not null,
-    jurisdiction text,
-    api_key      text,
-    send_method  text,
-    send_comments boolean not null default 'f',
-    comment_user_id int references users(id),
-    suppress_alerts boolean not null default 'f'
+    -- Problem details
+    problem_id int references problem(id) ON DELETE CASCADE not null,
+    comment_id int references comment(id) ON DELETE CASCADE unique,
+
+    title text null,
+    detail text null, -- or text for comment
+    photo bytea,
+    anonymous bool not null,
+
+    -- Metadata
+    created timestamp not null default current_timestamp
+);
+
+create table user_body_permissions (
+    id serial not null primary key,
+    user_id int references users(id) not null,
+    body_id int references body(id) not null,
+    permission_type text not null,
+    unique(user_id, body_id, permission_type)
+);
+
+create table user_planned_reports (
+    id serial not null primary key,
+    user_id int references users(id) not null,
+    report_id int references problem(id) not null,
+    added timestamp not null default current_timestamp,
+    removed timestamp
+);
+
+create table response_templates (
+    id serial not null primary key,
+    body_id int references body(id) not null,
+    title text not null,
+    text text not null,
+    created timestamp not null default current_timestamp,
+    auto_response boolean NOT NULL DEFAULT 'f',
+    state text,
+    external_status_code text,
+    unique(body_id, title)
+);
+
+CREATE TABLE contact_response_templates (
+    id serial NOT NULL PRIMARY KEY,
+    contact_id int REFERENCES contacts(id) NOT NULL,
+    response_template_id int REFERENCES response_templates(id) NOT NULL
+);
+
+CREATE TABLE contact_response_priorities (
+    id serial NOT NULL PRIMARY KEY,
+    contact_id int REFERENCES contacts(id) NOT NULL,
+    response_priority_id int REFERENCES response_priorities(id) NOT NULL
+);
+
+CREATE TABLE defect_types (
+    id serial not null primary key,
+    body_id int references body(id) not null,
+    name text not null,
+    description text not null,
+    extra text,
+    unique(body_id, name)
+);
+
+CREATE TABLE contact_defect_types (
+    id serial NOT NULL PRIMARY KEY,
+    contact_id int REFERENCES contacts(id) NOT NULL,
+    defect_type_id int REFERENCES defect_types(id) NOT NULL
+);
+
+ALTER TABLE problem
+    ADD COLUMN defect_type_id int REFERENCES defect_types(id);
+
+CREATE TABLE translation (
+    id serial not null primary key,
+    tbl text not null,
+    object_id integer not null,
+    col text not null,
+    lang text not null,
+    msgstr text not null,
+    unique(tbl, object_id, col, lang)
+);
+
+CREATE TABLE report_extra_fields (
+    id serial not null primary key,
+    name text not null,
+    cobrand text,
+    language text,
+    extra text
+);
+
+CREATE TABLE state (
+    id serial not null primary key,
+    label text not null unique,
+    type text not null check (type = 'open' OR type = 'closed' OR type = 'fixed'),
+    name text not null unique
 );

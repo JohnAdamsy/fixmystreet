@@ -20,28 +20,26 @@ __PACKAGE__->add_columns(
   },
   "contact_id",
   { data_type => "integer", is_nullable => 0 },
-  "area_id",
+  "body_id",
   { data_type => "integer", is_nullable => 0 },
   "category",
   { data_type => "text", default_value => "Other", is_nullable => 0 },
   "email",
   { data_type => "text", is_nullable => 0 },
-  "confirmed",
-  { data_type => "boolean", is_nullable => 0 },
-  "deleted",
-  { data_type => "boolean", is_nullable => 0 },
   "editor",
   { data_type => "text", is_nullable => 0 },
   "whenedited",
   { data_type => "timestamp", is_nullable => 0 },
   "note",
   { data_type => "text", is_nullable => 0 },
+  "state",
+  { data_type => "text", is_nullable => 0 },
 );
 __PACKAGE__->set_primary_key("contacts_history_id");
 
 
-# Created by DBIx::Class::Schema::Loader v0.07017 @ 2012-03-08 17:19:55
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:dN2ueIDoP3d/+Mg1UDqsMw
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2017-07-08 20:45:04
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:HTt0g29yXTM/WyHKN179FA
 
 
 # You can replace this text with custom code or comments, and it will be preserved on regeneration

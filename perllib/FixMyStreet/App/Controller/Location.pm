@@ -5,6 +5,8 @@ use namespace::autoclean;
 BEGIN {extends 'Catalyst::Controller'; }
 
 use Encode;
+use FixMyStreet::Geocode;
+use Utils;
 
 =head1 NAME
 
@@ -27,15 +29,15 @@ Use latitude and longitude if provided in parameters.
 sub determine_location_from_coords : Private {
     my ( $self, $c ) = @_;
 
-    my $latitude  = $c->req->param('latitude')  || $c->req->param('lat');
-    my $longitude = $c->req->param('longitude') || $c->req->param('lon');
+    my $latitude = $c->get_param('latitude') || $c->get_param('lat');
+    my $longitude = $c->get_param('longitude') || $c->get_param('lon');
 
     if ( defined $latitude && defined $longitude ) {
-        $c->stash->{latitude}  = $latitude;
-        $c->stash->{longitude} = $longitude;
+        ($c->stash->{latitude}, $c->stash->{longitude}) =
+            map { Utils::truncate_coordinate($_) } ($latitude, $longitude);
 
         # Also save the pc if there is one
-        if ( my $pc = $c->req->param('pc') ) {
+        if ( my $pc = $c->get_param('pc') ) {
             $c->stash->{pc} = $pc;
         }
 
@@ -49,6 +51,8 @@ sub determine_location_from_coords : Private {
 
 User has searched for a location - try to find it for them.
 
+Return false if nothing provided.
+
 If one match is found returns true and lat/lng is set.
 
 If several possible matches are found puts an array onto stash so that user can be prompted to pick one and returns false.
@@ -61,8 +65,22 @@ sub determine_location_from_pc : Private {
     my ( $self, $c, $pc ) = @_;
 
     # check for something to search
-    $pc ||= $c->req->param('pc') || return;
+    $pc ||= $c->get_param('pc') || return;
     $c->stash->{pc} = $pc;    # for template
+
+    if ( $pc =~ /^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/ ) {
+        ($c->stash->{latitude}, $c->stash->{longitude}) =
+            map { Utils::truncate_coordinate($_) } ($1, $2);
+        return $c->forward( 'check_location' );
+    }
+    if ( $c->cobrand->country eq 'GB' && $pc =~ /^([A-Z])([A-Z])([\d\s]{4,})$/i) {
+        if (my $convert = gridref_to_latlon( $1, $2, $3 )) {
+            ($c->stash->{latitude}, $c->stash->{longitude}) =
+                map { Utils::truncate_coordinate($_) }
+                ($convert->{latitude}, $convert->{longitude});
+            return $c->forward( 'check_location' );
+        }
+    }
 
     my ( $latitude, $longitude, $error ) =
         FixMyStreet::Geocode::lookup( $pc, $c );
@@ -77,7 +95,7 @@ sub determine_location_from_pc : Private {
     # $error doubles up to return multiple choices by being an array
     if ( ref($error) eq 'ARRAY' ) {
         foreach (@$error) {
-            my $a = decode_utf8($_->{address});
+            my $a = $_->{address};
             $a =~ s/, United Kingdom//;
             $a =~ s/, UK//;
             $_->{address} = $a;
@@ -87,8 +105,24 @@ sub determine_location_from_pc : Private {
     }
 
     # pass errors back to the template
+    $c->stash->{location_error_pc_lookup} = 1;
     $c->stash->{location_error} = $error;
     return;
+}
+
+sub determine_location_from_bbox : Private {
+    my ( $self, $c ) = @_;
+
+    my $bbox = $c->get_param('bbox');
+    return unless $bbox;
+
+    my ($min_lon, $min_lat, $max_lon, $max_lat) = split /,/, $bbox;
+    my $longitude = ($max_lon + $min_lon ) / 2;
+    my $latitude = ($max_lat + $min_lat ) / 2;
+    $c->stash->{bbox} = $bbox;
+    $c->stash->{latitude} = $latitude;
+    $c->stash->{longitude} = $longitude;
+    return $c->forward('check_location');
 }
 
 =head2 check_location
@@ -112,6 +146,36 @@ sub check_location : Private {
     }
 
     return 1;
+}
+
+# Utility function for if someone (rarely) enters a grid reference
+sub gridref_to_latlon {
+    my ( $a, $b, $num ) = @_;
+    $a = ord(uc $a) - 65; $a-- if $a > 7;
+    $b = ord(uc $b) - 65; $b-- if $b > 7;
+    my $e = (($a-2)%5)*5 + $b%5;
+    my $n = 19 - int($a/5)*5 - int($b/5);
+
+    $num =~ s/\s+//g;
+    my $l = length($num);
+    return if $l % 2 or $l > 10;
+
+    $l /= 2;
+    $e .= substr($num, 0, $l);
+    $n .= substr($num, $l);
+
+    if ( $l < 5 ) {
+        $e .= 5;
+        $n .= 5;
+        $e .= 0 x (4-$l);
+        $n .= 0 x (4-$l);
+    }
+
+    my ( $lat, $lon ) = Utils::convert_en_to_latlon( $e, $n );
+    return {
+        latitude => $lat,
+        longitude => $lon,
+    };
 }
 
 =head1 AUTHOR

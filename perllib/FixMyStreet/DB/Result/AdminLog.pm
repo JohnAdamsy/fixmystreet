@@ -29,16 +29,32 @@ __PACKAGE__->add_columns(
   "whenedited",
   {
     data_type     => "timestamp",
-    default_value => \"ms_current_timestamp()",
+    default_value => \"current_timestamp",
     is_nullable   => 0,
+    original      => { default_value => \"now()" },
   },
+  "user_id",
+  { data_type => "integer", is_foreign_key => 1, is_nullable => 1 },
+  "reason",
+  { data_type => "text", default_value => "", is_nullable => 0 },
+  "time_spent",
+  { data_type => "integer", default_value => 0, is_nullable => 0 },
 );
 __PACKAGE__->set_primary_key("id");
+__PACKAGE__->belongs_to(
+  "user",
+  "FixMyStreet::DB::Result::User",
+  { id => "user_id" },
+  {
+    is_deferrable => 0,
+    join_type     => "LEFT",
+    on_delete     => "NO ACTION",
+    on_update     => "NO ACTION",
+  },
+);
 
 
-# Created by DBIx::Class::Schema::Loader v0.07017 @ 2012-03-08 17:19:55
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:+NlSH8U+beRjBZl8CpqK9A
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2016-07-20 14:38:36
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:y2xZ4BDv7H+f4vbIZyNflw
 
-
-# You can replace this text with custom code or comments, and it will be preserved on regeneration
 1;

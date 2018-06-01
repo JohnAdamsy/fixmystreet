@@ -1,5 +1,3 @@
-#!/usr/bin/perl
-#
 # FixMyStreet:Map
 # Adding the ability to have different maps on FixMyStreet.
 #
@@ -18,7 +16,7 @@ use Module::Pluggable
 # Get the list of maps we want and load map classes at compile time
 my @ALL_MAP_CLASSES = allowed_maps();
 
-use mySociety::Gaze;
+use FixMyStreet::Gaze;
 use mySociety::Locale;
 use Utils;
 
@@ -37,9 +35,20 @@ sub allowed_maps {
     return grep { $avail{$_} } @allowed;
 }
 
+=head2 reload_allowed_maps
+
+Allows tests to override MAP_TYPE at run time.
+
+=cut
+
+sub reload_allowed_maps {
+    @ALL_MAP_CLASSES = allowed_maps();
+}
+
 =head2 map_class
 
-Set and return the appropriate class given a query parameter string.
+Sets the appropriate class given a query parameter string.
+Returns the old map class, if any.
 
 =cut
 
@@ -49,76 +58,57 @@ sub set_map_class {
     $str = __PACKAGE__.'::'.$str if $str;
     my %avail = map { $_ => 1 } @ALL_MAP_CLASSES;
     $str = $ALL_MAP_CLASSES[0] unless $str && $avail{$str};
+    my $old_map_class = $map_class;
     $map_class = $str;
-}
-
-sub header_js {
-    return $map_class->header_js(@_);
+    return $old_map_class;
 }
 
 sub display_map {
     return $map_class->display_map(@_);
 }
 
+sub map_javascript {
+    $map_class->map_javascript;
+}
+
 sub map_features {
-    my ( $c, $lat, $lon, $interval ) = @_;
+    my ( $c, %p ) = @_;
 
-   # TODO - be smarter about calculating the surrounding square
-   # use deltas that are roughly 500m in the UK - so we get a 1 sq km search box
-    my $lat_delta = 0.00438;
-    my $lon_delta = 0.00736;
-    return _map_features(
-        $c, $lat, $lon,
-        $lon - $lon_delta, $lat - $lat_delta,
-        $lon + $lon_delta, $lat + $lat_delta,
-        $interval
-    );
-}
+    if ($p{bbox}) {
+        @p{"min_lon", "min_lat", "max_lon", "max_lat"} = split /,/, $p{bbox};
+    }
 
-sub map_features_bounds {
-    my ( $c, $min_lon, $min_lat, $max_lon, $max_lat, $interval ) = @_;
+    if (defined $p{latitude} && defined $p{longitude}) {
+        # TODO - be smarter about calculating the surrounding square
+        # use deltas that are roughly 500m in the UK - so we get a 1 sq km search box
+        my $lat_delta = 0.00438;
+        my $lon_delta = 0.00736;
+        $p{min_lon} = Utils::truncate_coordinate($p{longitude} - $lon_delta);
+        $p{min_lat} = Utils::truncate_coordinate($p{latitude} - $lat_delta);
+        $p{max_lon} = Utils::truncate_coordinate($p{longitude} + $lon_delta);
+        $p{max_lat} = Utils::truncate_coordinate($p{latitude} + $lat_delta);
+    } else {
+        $p{longitude} = Utils::truncate_coordinate(($p{max_lon} + $p{min_lon} ) / 2);
+        $p{latitude} = Utils::truncate_coordinate(($p{max_lat} + $p{min_lat} ) / 2);
+    }
 
-    my $lat = ( $max_lat + $min_lat ) / 2;
-    my $lon = ( $max_lon + $min_lon ) / 2;
-    return _map_features(
-        $c, $lat, $lon,
-        $min_lon, $min_lat,
-        $max_lon, $max_lat,
-        $interval
-    );
-}
+    $p{page} = $c->get_param('p') || 1;
+    my $on_map = $c->cobrand->problems_on_map->around_map( $c, %p );
+    my $pager = $c->stash->{pager} = $on_map->pager;
+    $on_map = [ $on_map->all ];
 
-sub _map_features {
-    my ( $c, $lat, $lon, $min_lon, $min_lat, $max_lon, $max_lat, $interval ) = @_;
+    my $dist = FixMyStreet::Gaze::get_radius_containing_population( $p{latitude}, $p{longitude} );
 
-    # list of problems around map can be limited, but should show all pins
-    my $around_limit = $c->cobrand->on_map_list_limit || undef;
+    my $nearby;
+    if (@$on_map < $pager->entries_per_page && $pager->current_page == 1) {
+        my $limit = 20;
+        my @ids = map { $_->id } @$on_map;
+        $nearby = $c->model('DB::Nearby')->nearby(
+            $c, $dist, \@ids, $limit, @p{"latitude", "longitude", "categories", "states", "extra"}
+        );
+    }
 
-    my @around_args = ( $min_lat, $max_lat, $min_lon, $max_lon, $interval );
-    my $around_map      = $c->cobrand->problems->around_map( @around_args, undef );
-    my $around_map_list = $around_limit
-        ? $c->cobrand->problems->around_map( @around_args, $around_limit )
-        : $around_map;
-
-    my $dist;
-    mySociety::Locale::in_gb_locale {
-        $dist =
-          mySociety::Gaze::get_radius_containing_population( $lat, $lon,
-            200000 );
-    };
-    $dist = int( $dist * 10 + 0.5 ) / 10;
-
-    my $limit  = 20;
-    my @ids    = map { $_->id } @$around_map_list;
-    my $nearby = $c->model('DB::Nearby')->nearby(
-        $c, $dist, \@ids, $limit, $lat, $lon, $interval
-    );
-
-    return ( $around_map, $around_map_list, $nearby, $dist );
-}
-
-sub map_pins {
-    return $map_class->map_pins(@_);
+    return ( $on_map, $nearby, $dist );
 }
 
 sub click_to_wgs84 {

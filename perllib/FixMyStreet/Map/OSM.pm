@@ -1,5 +1,3 @@
-#!/usr/bin/perl
-#
 # FixMyStreet:Map::OSM
 # OSM maps on FixMyStreet.
 #
@@ -10,29 +8,31 @@ package FixMyStreet::Map::OSM;
 
 use strict;
 use Math::Trig;
-use mySociety::Gaze;
+use FixMyStreet::Gaze;
 use Utils;
 
-use constant ZOOM_LEVELS    => 5;
+use constant ZOOM_LEVELS    => 6;
 use constant MIN_ZOOM_LEVEL => 13;
 
-sub map_type {
-    return 'OpenLayers.Layer.OSM.Mapnik';
-}
+sub map_type { 'OpenLayers.Layer.OSM.Mapnik' }
 
-sub map_template {
-    return 'osm';
-}
+sub map_template { 'osm' }
+
+sub map_javascript { [
+    '/vendor/OpenLayers/OpenLayers.fixmystreet.js',
+    '/js/map-OpenLayers.js',
+    '/js/map-OpenStreetMap.js',
+] }
 
 sub map_tiles {
     my ( $self, %params ) = @_;
     my ( $x, $y, $z ) = ( $params{x_tile}, $params{y_tile}, $params{zoom_act} );
     my $tile_url = $self->base_tile_url();
     return [
-        "http://a.$tile_url/$z/" . ($x - 1) . "/" . ($y - 1) . ".png",
-        "http://b.$tile_url/$z/$x/" . ($y - 1) . ".png",
-        "http://c.$tile_url/$z/" . ($x - 1) . "/$y.png",
-        "http://$tile_url/$z/$x/$y.png",
+        "https://a.$tile_url/$z/" . ($x - 1) . "/" . ($y - 1) . ".png",
+        "https://b.$tile_url/$z/$x/" . ($y - 1) . ".png",
+        "https://c.$tile_url/$z/" . ($x - 1) . "/$y.png",
+        "https://a.$tile_url/$z/$x/$y.png",
     ];
 }
 
@@ -41,7 +41,7 @@ sub base_tile_url {
 }
 
 sub copyright {
-    return _('Map &copy; <a id="osm_link" href="http://www.openstreetmap.org/">OpenStreetMap</a> and contributors, <a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>');
+    _('&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors');
 }
 
 # display_map C PARAMS
@@ -52,26 +52,37 @@ sub copyright {
 sub display_map {
     my ($self, $c, %params) = @_;
 
+    # Map centre may be overridden in the query string
+    $params{latitude} = Utils::truncate_coordinate($c->get_param('lat') + 0)
+        if defined $c->get_param('lat');
+    $params{longitude} = Utils::truncate_coordinate($c->get_param('lon') + 0)
+        if defined $c->get_param('lon');
+
+    my %data;
+    $data{cobrand} = $c->cobrand;
+    $data{distance} = $c->stash->{distance};
+    $data{zoom} = $c->get_param('zoom') + 0 if defined $c->get_param('zoom');
+
+    $c->stash->{map} = $self->generate_map_data(\%data, %params);
+}
+
+sub generate_map_data {
+    my ($self, $data, %params) = @_;
+
     my $numZoomLevels = ZOOM_LEVELS;
     my $zoomOffset = MIN_ZOOM_LEVEL;
     if ($params{any_zoom}) {
-        $numZoomLevels = 18;
+        $numZoomLevels = 19;
         $zoomOffset = 0;
     }
 
     # Adjust zoom level dependent upon population density
-    my $dist = $c->stash->{distance}
-        || mySociety::Gaze::get_radius_containing_population( $params{latitude}, $params{longitude}, 200_000 );
-    my $default_zoom = $numZoomLevels - 3;
-    $default_zoom = $numZoomLevels - 2 if $dist < 10;
+    my $dist = $data->{distance}
+        || FixMyStreet::Gaze::get_radius_containing_population( $params{latitude}, $params{longitude} );
+    my $default_zoom = $data->{cobrand}->default_map_zoom() || ($numZoomLevels - 4);
+    $default_zoom = $numZoomLevels - 3 if $dist < 10;
 
-    # Map centre may be overridden in the query string
-    $params{latitude} = Utils::truncate_coordinate($c->req->params->{lat} + 0)
-        if defined $c->req->params->{lat};
-    $params{longitude} = Utils::truncate_coordinate($c->req->params->{lon} + 0)
-        if defined $c->req->params->{lon};
-
-    my $zoom = defined $c->req->params->{zoom} ? $c->req->params->{zoom} + 0 : $default_zoom;
+    my $zoom = $data->{zoom} || $default_zoom;
     $zoom = $numZoomLevels - 1 if $zoom >= $numZoomLevels;
     $zoom = 0 if $zoom < 0;
     $params{zoom_act} = $zoomOffset + $zoom;
@@ -81,7 +92,7 @@ sub display_map {
         ($pin->{px}, $pin->{py}) = latlon_to_px($pin->{latitude}, $pin->{longitude}, $params{x_tile}, $params{y_tile}, $params{zoom_act});
     }
 
-    $c->stash->{map} = {
+    return {
         %params,
         type => $self->map_template(),
         map_type => $self->map_type(),
@@ -92,29 +103,6 @@ sub display_map {
         numZoomLevels => $numZoomLevels,
         compass => compass( $params{x_tile}, $params{y_tile}, $params{zoom_act} ),
     };
-}
-
-sub map_pins {
-    my ($self, $c, $interval) = @_;
-
-    my $bbox = $c->req->param('bbox');
-    my ( $min_lon, $min_lat, $max_lon, $max_lat ) = split /,/, $bbox;
-
-    my ( $around_map, $around_map_list, $nearby, $dist ) =
-      FixMyStreet::Map::map_features_bounds( $c, $min_lon, $min_lat, $max_lon, $max_lat, $interval );
-
-    # create a list of all the pins
-    my @pins = map {
-        # Here we might have a DB::Problem or a DB::Nearby, we always want the problem.
-        my $p = (ref $_ eq 'FixMyStreet::App::Model::DB::Nearby') ? $_->problem : $_;
-        my $colour = $c->cobrand->pin_colour( $p, 'around' );
-        [ $p->latitude, $p->longitude,
-          $colour,
-          $p->id, $p->title
-        ]
-    } @$around_map, @$nearby;
-
-    return (\@pins, $around_map_list, $nearby, $dist);
 }
 
 sub compass {
@@ -193,7 +181,7 @@ sub click_to_wgs84 {
     my ($self, $c, $pin_tile_x, $pin_x, $pin_tile_y, $pin_y) = @_;
     my $tile_x = click_to_tile($pin_tile_x, $pin_x);
     my $tile_y = click_to_tile($pin_tile_y, $pin_y);
-    my $zoom = MIN_ZOOM_LEVEL + (defined $c->req->params->{zoom} ? $c->req->params->{zoom} : 3);
+    my $zoom = MIN_ZOOM_LEVEL + (defined $c->get_param('zoom') ? $c->get_param('zoom') : 3);
     my ($lat, $lon) = tile_to_latlon($tile_x, $tile_y, $zoom);
     return ( $lat, $lon );
 }

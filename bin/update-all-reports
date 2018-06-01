@@ -8,65 +8,54 @@
 
 use strict;
 use warnings;
-require 5.8.0;
 
-use FixMyStreet::App;
-use File::Path ();
-use File::Slurp;
-use JSON;
-use List::MoreUtils qw(zip);
-
-my $fourweeks = 4*7*24*60*60;
-
-my $problems = FixMyStreet::App->model("DB::Problem")->search(
-    {
-        state => [ FixMyStreet::DB::Result::Problem->visible_states() ],
-    },
-    {
-        columns => [
-            'id', 'council', 'state', 'areas',
-            { duration => { extract => "epoch from current_timestamp-lastupdate" } },
-            { age      => { extract => "epoch from current_timestamp-confirmed"  } },
-        ]
-    }
-);
-$problems = $problems->cursor; # Raw DB cursor for speed
-
-my ( %fixed, %open );
-my @cols = ( 'id', 'council', 'state', 'areas', 'duration', 'age' );
-while ( my @problem = $problems->next ) {
-    my %problem = zip @cols, @problem;
-    my @areas;
-    if ( !$problem{council} ) {
-        # Problem was not sent to any council, add to all areas
-        @areas = grep { $_ } split( /,/, $problem{areas} );
-        $problem{councils} = 0;
-    } else {
-        # Add to councils it was sent to
-        (my $council = $problem{council}) =~ s/\|.*$//;
-        @areas = split( /,/, $council );
-        $problem{councils} = scalar @areas;
-    }
-    foreach my $council ( @areas ) {
-        my $duration_str = ( $problem{duration} > 2 * $fourweeks ) ? 'old' : 'new';
-        my $type = ( $problem{duration} > 2 * $fourweeks )
-            ? 'unknown'
-            : ($problem{age} > $fourweeks ? 'older' : 'new');
-        if (FixMyStreet::DB::Result::Problem->fixed_states()->{$problem{state}}) {
-            # Fixed problems are either old or new
-            $fixed{$council}{$duration_str}++ if FixMyStreet::DB::Result::Problem->fixed_states()->{$problem{state}};
-        } else {
-            # Open problems are either unknown, older, or new
-            $open{$council}{$type}++ if $problem{state} eq 'confirmed';
-        }
-    }
+BEGIN {
+    use File::Basename qw(dirname);
+    use File::Spec;
+    my $d = dirname(File::Spec->rel2abs($0));
+    require "$d/../setenv.pl";
 }
 
-my $body = JSON->new->utf8(1)->encode( {
-    fixed => \%fixed,
-    open  => \%open,
-} );
+use FixMyStreet::DB;
+use FixMyStreet::Script::UpdateAllReports;
+use Path::Tiny;
+use Getopt::Long::Descriptive;
+use JSON::MaybeXS;
 
-File::Path::mkpath( FixMyStreet->path_to( '../data/' )->stringify );
-File::Slurp::write_file( FixMyStreet->path_to( '../data/all-reports.json' )->stringify, \$body );
+my ($opt, $usage) = describe_options(
+    '%c %o',
+    [ 'table', "Output JSON for old table-style page." ],
+    [ 'body=i', "Restrict results to a particular body (dashboard-style)." ],
+    [ 'all-bodies', "Generate set of results for all bodies." ],
+    [ 'areas', "Include area IDs in output JSON (table-style)." ],
+    [ 'help', "print usage message and exit", { shortcircuit => 1 } ],
+);
+print($usage->text), exit if $opt->help;
 
+my ($data, $filename);
+if ($opt->table) {
+    $data = FixMyStreet::Script::UpdateAllReports::generate($opt->areas);
+    output('all-reports', $data);
+} elsif ($opt->all_bodies) {
+    my $bodies = FixMyStreet::DB->resultset("Body")->active;
+    while (my $body = $bodies->next) {
+        next unless $body->body_areas->first;
+        my $data = FixMyStreet::Script::UpdateAllReports::generate_dashboard($body);
+        output("all-reports-dashboard-" . $body->id, $data);
+    }
+} elsif (my $body_id = $opt->body) {
+    my $body = FixMyStreet::DB->resultset("Body")->find({ id => $body_id });
+    die "Could not find body $body_id" unless $body;
+    $data = FixMyStreet::Script::UpdateAllReports::generate_dashboard($body);
+    output("all-reports-dashboard-$body_id", $data);
+} else {
+    $data = FixMyStreet::Script::UpdateAllReports::generate_dashboard();
+    output("all-reports-dashboard", $data);
+}
+
+sub output {
+    my ($filename, $data) = @_;
+    my $json = encode_json($data);
+    path(FixMyStreet->path_to('../data/'))->mkpath;
+    path(FixMyStreet->path_to("../data/$filename.json"))->spew_utf8($json);
+}

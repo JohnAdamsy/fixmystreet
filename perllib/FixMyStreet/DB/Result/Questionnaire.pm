@@ -36,31 +36,25 @@ __PACKAGE__->belongs_to(
   "problem",
   "FixMyStreet::DB::Result::Problem",
   { id => "problem_id" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
 );
 
 
-# Created by DBIx::Class::Schema::Loader v0.07017 @ 2012-03-08 17:19:55
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:NGlSRjoBpDoIvK3EueqN6Q
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2013-09-10 17:11:54
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:oL1Hk4/bNG14CY74GA75SA
 
-use DateTime::TimeZone;
+use Moo;
+use namespace::clean -except => [ 'meta' ];
 
-my $tz = DateTime::TimeZone->new( name => "local" );
+my $stz = sub {
+    my ( $orig, $self ) = ( shift, shift );
+    my $s = $self->$orig(@_);
+    return $s unless $s && UNIVERSAL::isa($s, "DateTime");
+    FixMyStreet->set_time_zone($s);
+    return $s;
+};
 
-sub whensent_local {
-    my $self = shift;
-
-    return $self->whensent
-      ? $self->whensent->set_time_zone($tz)
-      : $self->whensent;
-}
-
-sub whenanswered_local {
-    my $self = shift;
-
-    return $self->whenanswered
-      ? $self->whenanswered->set_time_zone($tz)
-      : $self->whenanswered;
-}
+around whensent => $stz;
+around whenanswered => $stz;
 
 1;

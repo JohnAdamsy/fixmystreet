@@ -38,6 +38,20 @@ sub moniker {
     return $last_part;
 }
 
+=head2 asset_moniker
+
+    $moniker = $cobrand_class->asset_moniker();
+
+Same as moniker, except for the cobrand with the 'fixmystreet' moniker, when it
+returns 'fixmystreet.com', as to avoid confusion that's where its assets are.
+
+=cut
+
+sub asset_moniker {
+    my $self = shift;
+    return $self->moniker eq 'fixmystreet' ? 'fixmystreet.com' : $self->moniker;
+}
+
 =head2 is_default
 
     $bool = $cobrand->is_default();
@@ -51,19 +65,20 @@ sub is_default {
     return $self->moniker eq 'default';
 }
 
-=head2 path_to_web_templates
+=head2 call_hook
 
-    $path = $cobrand->path_to_web_templates(  );
-
-Returns the path to the templates for this cobrand - by default
-"templates/web/$moniker"
+  $cobrand->call_hook(foo => 1, 2, 3); # calls $cobrand->foo(1, 2, 3) if it exists
 
 =cut
 
-sub path_to_web_templates {
-    my $self = shift;
-    return [ FixMyStreet->path_to( 'templates/web/fixmystreet' )->stringify ];
+sub call_hook {
+    my ($self, $method_name, @args) = @_;
+    my $method = $self->can($method_name) or return;
+    return $self->$method(@args);
 }
+
+# NB: this Base class is for 'meta' features.  To add base methods for all cobrands,
+# you may want to look at FMS::Cobrand::Default instead!
 
 1;
 
